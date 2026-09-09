@@ -12,6 +12,22 @@ way `ALLOWED_SOURCES` and the consent gates in `digital_dna.py`
 describe. That claim is only worth anything if someone other than the
 author can verify it's true by reading the code.
 
+## Verifying this yourself
+
+`project_identifier.py` hashes every tracked source file's actual
+bytes (SHA-256) and folds them into one project-wide identifier — see
+`PROJECT_FILES` in that file for exactly what's covered. Run it
+yourself:
+
+    python3 project_identifier.py
+
+Last verified: `project_id 9fc0781b08917059ee40b4b45e860d2a0284690803c1bbd2a54c45060fedbdfd`
+(16/16 files), against commit `5fde108` on `master` (2026-09-09) —
+the state right after the `interop_client.cpp` Windows/Winsock fix
+and the `.gitignore` commit that followed it. If your own run against
+that same commit produces a different identifier, something changed
+that shouldn't have — that's the entire point of running it.
+
 ## What must stay open source
 
 - `digital_dna.py` — the consent gate (`add_live_signal`,
