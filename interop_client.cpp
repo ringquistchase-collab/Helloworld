@@ -1,9 +1,11 @@
 // interop_client.cpp
 // A real C++ client speaking network_os.py's wire protocol (PROTOCOL.md).
-// Uses OpenSSL (libssl/libcrypto) for Ed25519/X25519/AES-256-GCM/SHA-256,
-// and raw POSIX sockets for the TCP transport.
+// Uses OpenSSL (libssl/libcrypto) for Ed25519/X25519/AES-256-GCM/SHA-256.
+// TCP transport is raw POSIX sockets on Linux/macOS, Winsock on Windows
+// (the #ifdef _WIN32 block below) -- same wire behavior either way.
 //
-// Build:  g++ -std=c++17 interop_client.cpp -lssl -lcrypto -o interop_client
+// Build (Linux/macOS): g++ -std=c++17 interop_client.cpp -lssl -lcrypto -o interop_client
+// Build (Windows/MinGW): g++ -std=c++17 interop_client.cpp -lssl -lcrypto -lws2_32 -o interop_client.exe
 // Run:    ./interop_client 127.0.0.1 9501
 
 #include <iostream>
@@ -15,10 +17,19 @@
 #include <chrono>
 #include <thread>
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  typedef SOCKET sock_t;
+  #define CLOSESOCK closesocket
+#else
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #include <unistd.h>
+  typedef int sock_t;
+  #define CLOSESOCK close
+#endif
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -94,6 +105,11 @@ std::vector<unsigned char> hkdfSha256(const std::vector<unsigned char>& ikm,
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
     std::string host = argc > 1 ? argv[1] : "127.0.0.1";
     int port = argc > 2 ? std::stoi(argv[2]) : 9501;
 
@@ -126,7 +142,7 @@ int main(int argc, char** argv) {
 
     std::cout << "[cpp] connecting to " << host << ":" << port << std::endl;
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    sock_t sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -141,7 +157,7 @@ int main(int argc, char** argv) {
     std::cout << "[cpp] sent hello (node_id=" << nodeId << ")" << std::endl;
 
     char buf[65536];
-    ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+    int n = recv(sock, buf, sizeof(buf) - 1, 0);
     buf[n] = 0;
     std::string response(buf);
     std::cout << "[cpp] received: " << response << std::endl;
@@ -161,7 +177,7 @@ int main(int argc, char** argv) {
                                    (const unsigned char*)toVerify.data(), toVerify.size());
     EVP_MD_CTX_free(vctx);
     std::cout << "[cpp] Python node signature verified: " << (sigOk == 1 ? "true" : "false") << std::endl;
-    if (sigOk != 1) { close(sock); return 1; }
+    if (sigOk != 1) { CLOSESOCK(sock); return 1; }
 
     EVP_PKEY* peerExchangePub = pkeyFromRawPubHex(peerExchangePubHex, EVP_PKEY_X25519);
     EVP_PKEY_CTX* ectx = EVP_PKEY_CTX_new(exchangeKey, nullptr);
@@ -240,8 +256,11 @@ int main(int argc, char** argv) {
     std::cout << "[cpp] sent signed, AES-256-GCM-encrypted block to Python node" << std::endl;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    close(sock);
+    CLOSESOCK(sock);
     std::cout << "[cpp] done, closing" << std::endl;
 
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return 0;
 }
