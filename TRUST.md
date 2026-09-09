@@ -21,12 +21,12 @@ yourself:
 
     python3 project_identifier.py
 
-Last verified: `project_id 11e743ba410f09e660693e884b0234b1b10c809edd6ac1d89eb637412f9d9168`
-(18/18 files), against commit `d8845df` on `master` (2026-09-09) — the
-state right after the previous "last verified" note was recorded.
-If your own run against that same commit produces a different
-identifier, something changed that shouldn't have — that's the entire
-point of running it.
+Last verified: `project_id 97c46dfc10bc75eb57ae668ac244915d2511e10b338db3a43adcb1d50e60f960`
+(21/21 files), against commit `fa0a5af` on `master` (2026-09-09) — the
+state right after `maxwell_chain_agent.py` and
+`integrated_maxwell_agent.py` were added. If your own run against
+that same commit produces a different identifier, something changed
+that shouldn't have — that's the entire point of running it.
 
 Note the inherent limit here: since this file is itself one of the
 hashed files, editing this note to record a new identifier changes
