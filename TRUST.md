@@ -21,12 +21,20 @@ yourself:
 
     python3 project_identifier.py
 
-Last verified: `project_id 9fc0781b08917059ee40b4b45e860d2a0284690803c1bbd2a54c45060fedbdfd`
-(16/16 files), against commit `5fde108` on `master` (2026-09-09) —
-the state right after the `interop_client.cpp` Windows/Winsock fix
-and the `.gitignore` commit that followed it. If your own run against
-that same commit produces a different identifier, something changed
-that shouldn't have — that's the entire point of running it.
+Last verified: `project_id 14e277df000c5984695d7bf3b5e120c868925dce40ffb025ac854e9da552a621`
+(16/16 files), against commit `b736869` on `master` (2026-09-09) — the
+state right after the first "last verified" note was added to this
+file. If your own run against that same commit produces a different
+identifier, something changed that shouldn't have — that's the entire
+point of running it.
+
+Note the inherent limit here: since this file is itself one of the 16
+hashed files, editing this note to record a new identifier changes
+`project_id` again, immediately. This note can only ever state the
+identifier as of the commit *before* the edit that added it — it can
+never contain its own post-edit identifier. That's not a bug, it's
+what makes the claim checkable: pin the note to a specific commit,
+and anyone can reproduce it exactly.
 
 ## What must stay open source
 
