@@ -47,6 +47,7 @@ import os
 PROJECT_FILES = [
     "digital_dna.py", "network_os.py", "crypto_layer.py",
     "growing_research_agent.py", "run_agent.py", "run_all.py",
+    "lora_style_training.py",
     "interop_client.go", "interop_client.rb", "interop_client.cpp",
     "interop_client.js", "interop_client.py", "JavaInteropClient.java",
     "project_identifier.py",
