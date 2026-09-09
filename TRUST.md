@@ -21,9 +21,9 @@ yourself:
 
     python3 project_identifier.py
 
-Last verified: `project_id fdc12cfab0b6c89409a3367e563280bd3f2dfdf415f28246a88ef4d6609da802`
-(17/17 files), against commit `a71a922` on `master` (2026-09-09) — the
-state right after `lora_style_training.py` was added and tracked in
+Last verified: `project_id 186195b399818f0439c123631386929b2388be24cc2f8f563ce936725a1aba6a`
+(18/18 files), against commit `699e20a` on `master` (2026-09-09) — the
+state right after `maxwell_style_images.py` was added and tracked in
 `PROJECT_FILES`. If your own run against that same commit produces a
 different identifier, something changed that shouldn't have — that's
 the entire point of running it.
