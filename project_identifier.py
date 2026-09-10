@@ -61,6 +61,8 @@ PROJECT_FILES = [
     "tests/test_maxwell_chain_agent.py", "tests/test_audit_trail.py",
     "tests/test_token_ledger.py", "tests/test_crispr_guide_design.py", "tests/test_network_os.py",
     ".github/workflows/verify.yml",
+    "scripts/local_verify_node.py", "scripts/verify.ps1",
+    "scripts/verify.sh", "scripts/verify.bat",
 ]
 
 

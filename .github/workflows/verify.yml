@@ -33,25 +33,13 @@ jobs:
 
       - name: Interop smoke test (real Python client against a live node)
         run: |
-          python -c "
-          import asyncio, sys
-          sys.path.insert(0, '.')
-          from digital_dna import DigitalDNA
-          from network_os import NetworkNode
-
-          async def main():
-              dna = DigitalDNA(seed_label='ci-node', dna_path='ci_node.dna.json')
-              node = NetworkNode(dna, host='127.0.0.1', port=18765)
-              await node.start()
-              print(f'node_id={node.node_id}', flush=True)
-              await asyncio.Event().wait()
-
-          asyncio.run(main())
-          " &
+          python scripts/local_verify_node.py &
           NODE_PID=$!
           sleep 2
+          set +e
           python interop_client.py 127.0.0.1 18765
           INTEROP_EXIT=$?
+          set -e
           kill "$NODE_PID" 2>/dev/null || true
           echo "## Interop smoke test" >> "$GITHUB_STEP_SUMMARY"
           if [ "$INTEROP_EXIT" -eq 0 ]; then
