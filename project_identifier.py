@@ -54,8 +54,13 @@ PROJECT_FILES = [
     "interop_client.go", "interop_client.rb", "interop_client.cpp",
     "interop_client.js", "interop_client.py", "JavaInteropClient.java",
     "project_identifier.py",
-    "PROTOCOL.md", "TRUST.md",
+    "PROTOCOL.md", "TRUST.md", "KNOWN_GAPS.md",
     "maxwell blockchain.py",
+    "requirements.txt", "pytest.ini",
+    "tests/conftest.py", "tests/test_crypto_layer.py", "tests/test_digital_dna.py",
+    "tests/test_maxwell_chain_agent.py", "tests/test_audit_trail.py",
+    "tests/test_token_ledger.py", "tests/test_crispr_guide_design.py", "tests/test_network_os.py",
+    ".github/workflows/verify.yml",
 ]
 
 
@@ -141,14 +146,18 @@ if __name__ == "__main__":
             if os.path.exists(src):
                 with open(src) as fh:
                     content = fh.read()
-                with open(os.path.join(tmp, f), "w") as fh:
+                dest = os.path.join(tmp, f)
+                os.makedirs(os.path.dirname(dest) or tmp, exist_ok=True)
+                with open(dest, "w") as fh:
                     fh.write(content + "\n# tampered")
         # copy the rest unchanged for a fair comparison
         for f in PROJECT_FILES:
             if f != "digital_dna.py" and os.path.exists(f):
                 with open(f, "rb") as fh:
                     content = fh.read()
-                with open(os.path.join(tmp, f), "wb") as fh:
+                dest = os.path.join(tmp, f)
+                os.makedirs(os.path.dirname(dest) or tmp, exist_ok=True)
+                with open(dest, "wb") as fh:
                     fh.write(content)
 
         tampered_result = compute_project_identifier(base_dir=tmp)

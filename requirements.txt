@@ -1,0 +1,8 @@
+cryptography>=50.0.0
+matplotlib>=3.11.0
+numpy>=2.5.0
+biopython>=1.88
+
+# testing
+pytest>=9.1.0
+pytest-asyncio>=1.4.0

@@ -21,20 +21,20 @@ yourself:
 
     python3 project_identifier.py
 
-Last verified: `project_id 97c46dfc10bc75eb57ae668ac244915d2511e10b338db3a43adcb1d50e60f960`
-(21/21 files), against commit `fa0a5af` on `master` (2026-09-09) — the
-state right after `maxwell_chain_agent.py` and
-`integrated_maxwell_agent.py` were added. If your own run against
-that same commit produces a different identifier, something changed
-that shouldn't have — that's the entire point of running it.
+Every push to `master` runs this same command in CI (see
+`.github/workflows/verify.yml`) alongside the automated test suite in
+`tests/`, and the resulting `project_id` shows up in that run's job
+summary. Check the Actions tab for the current value rather than
+looking for one hardcoded here: this file is itself one of the hashed
+files, so any specific identifier written into it would already be
+stale the moment the edit that added it was committed — CI re-derives
+it fresh on every change instead of chasing a note that can't keep up
+with its own file.
 
-Note the inherent limit here: since this file is itself one of the
-hashed files, editing this note to record a new identifier changes
-`project_id` again, immediately. This note can only ever state the
-identifier as of the commit *before* the edit that added it — it can
-never contain its own post-edit identifier. That's not a bug, it's
-what makes the claim checkable: pin the note to a specific commit,
-and anyone can reproduce it exactly.
+Also see `KNOWN_GAPS.md` for what's real-but-unverified or
+deliberately not implemented yet — this file states what the project
+claims to guarantee; that one states where the guarantee hasn't been
+exercised yet.
 
 ## What must stay open source
 

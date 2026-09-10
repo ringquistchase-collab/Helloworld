@@ -1,0 +1,62 @@
+name: verify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compute project identifier
+        run: |
+          OUTPUT=$(python project_identifier.py)
+          echo "$OUTPUT"
+          echo "## project_identifier.py" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$OUTPUT" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run test suite
+        run: python -m pytest tests/ -v
+
+      - name: Interop smoke test (real Python client against a live node)
+        run: |
+          python -c "
+          import asyncio, sys
+          sys.path.insert(0, '.')
+          from digital_dna import DigitalDNA
+          from network_os import NetworkNode
+
+          async def main():
+              dna = DigitalDNA(seed_label='ci-node', dna_path='ci_node.dna.json')
+              node = NetworkNode(dna, host='127.0.0.1', port=18765)
+              await node.start()
+              print(f'node_id={node.node_id}', flush=True)
+              await asyncio.Event().wait()
+
+          asyncio.run(main())
+          " &
+          NODE_PID=$!
+          sleep 2
+          python interop_client.py 127.0.0.1 18765
+          INTEROP_EXIT=$?
+          kill "$NODE_PID" 2>/dev/null || true
+          echo "## Interop smoke test" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$INTEROP_EXIT" -eq 0 ]; then
+            echo "Python interop client completed a real handshake + signed block round trip against a live node. See KNOWN_GAPS.md -- the other five language clients aren't in CI yet." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "FAILED -- interop_client.py exited with code $INTEROP_EXIT" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$INTEROP_EXIT"
