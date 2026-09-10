@@ -26,6 +26,7 @@
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
+  #include <netdb.h>
   #include <unistd.h>
   typedef int sock_t;
   #define CLOSESOCK close
@@ -142,15 +143,28 @@ int main(int argc, char** argv) {
 
     std::cout << "[cpp] connecting to " << host << ":" << port << std::endl;
 
-    sock_t sock = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
-    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
-        std::cerr << "[cpp] connect failed" << std::endl;
+    // getaddrinfo -- protocol-agnostic, works for both IPv4 and IPv6
+    // (fixes the earlier AF_INET-only hardcoding), and is available
+    // identically on both platforms this file supports: <netdb.h> on
+    // POSIX, <ws2tcpip.h> on Windows (already included above).
+    struct addrinfo hints{}, *res;
+    hints.ai_family = AF_UNSPEC;      // let the resolver pick IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM;
+    std::string port_str = std::to_string(port);
+
+    int gai_result = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
+    if (gai_result != 0) {
+        std::cerr << "[cpp] address resolution failed: " << gai_strerror(gai_result) << std::endl;
         return 1;
     }
+
+    sock_t sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock == (sock_t)-1 || connect(sock, res->ai_addr, (int)res->ai_addrlen) != 0) {
+        std::cerr << "[cpp] connect failed" << std::endl;
+        freeaddrinfo(res);
+        return 1;
+    }
+    freeaddrinfo(res);
 
     std::string helloLine = hello.str() + "\n";
     send(sock, helloLine.data(), helloLine.size(), 0);
