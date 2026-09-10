@@ -71,6 +71,19 @@ are two DIFFERENT real systems, deliberately not merged:
   it there explicitly via MaxwellChainAgent.mine_block() -- this
   file's mine_and_broadcast() only ever touches network_ledger.
 
+PEER ADDRESS HISTORY
+----------------------------
+Each PeerInfo tracks every (host, port) a given node_id has connected
+from, with a timestamp for when each was first seen
+(PeerInfo.address_history). A peer reconnecting from a NEW address
+(their IP changed, they're behind a different NAT/relay, etc.) is
+logged as `peer_reconnected_new_address` to the audit trail when one
+is configured -- this is visibility, not a security control: the
+Ed25519 signature is still what actually proves who's on the other
+end (see "WHAT THIS IS NOT" above on trust-on-first-use limits), the
+address history just gives you something to look at if a peer's
+apparent location keeps changing in a way you'd want to notice.
+
 TOPIC GOSSIP — kept working for growing_research_agent.py
 ----------------------------------------------------------------
 growing_research_agent.py's GrowingResearchAgent calls
@@ -166,6 +179,7 @@ class PeerInfo:
     latest_block_hash: str | None = None
     signing_pub: object = None      # Ed25519PublicKey, once verified
     session_key: bytes | None = None  # AES-256 key from X25519 ECDH
+    address_history: list = field(default_factory=list)  # [(host, port, first_seen_ts), ...]
 
 
 class NetworkNode:
@@ -295,14 +309,33 @@ class NetworkNode:
             session_key = ck.derive_shared_key(
                 self.exchange_priv, ck.exchange_pub_from_hex(msg["exchange_pub"])
             )
+            existing = self.peers.get(pid)
+            new_port = msg.get("listen_port", 0)
+            reconnected_new_address = (
+                existing is not None and (existing.host, existing.port) != (peer_host, new_port)
+            )
+            address_history = existing.address_history if existing else []
+            if not address_history or address_history[-1][:2] != (peer_host, new_port):
+                address_history = address_history + [(peer_host, new_port, time.time())]
+
             self.peers[pid] = PeerInfo(
-                node_id=pid, host=peer_host, port=msg.get("listen_port", 0),
+                node_id=pid, host=peer_host, port=new_port,
                 writer=writer, last_seen=time.time(),
                 signing_pub=ck.signing_pub_from_hex(msg["signing_pub"]),
                 session_key=session_key,
+                address_history=address_history,
             )
             self.network_ledger.setdefault(pid, [])
             if self.audit is not None:
+                if reconnected_new_address:
+                    self.audit.log(
+                        module="network_os", action="peer_reconnected_new_address", node_id=self.node_id,
+                        details={
+                            "peer_node_id": pid,
+                            "previous_address": f"{existing.host}:{existing.port}",
+                            "new_address": f"{peer_host}:{new_port}",
+                        },
+                    )
                 self.audit.log(
                     module="network_os", action="handshake_accepted", node_id=self.node_id,
                     details={"peer_node_id": pid, "peer_host": peer_host},
@@ -322,11 +355,29 @@ class NetworkNode:
             session_key = ck.derive_shared_key(
                 self.exchange_priv, ck.exchange_pub_from_hex(msg["exchange_pub"])
             )
+            existing = self.peers.get(pid)
+            reconnected_new_address = (
+                existing is not None and (existing.host, existing.port) != (peer_host, 0)
+            )
+            address_history = existing.address_history if existing else []
+            if not address_history or address_history[-1][:2] != (peer_host, 0):
+                address_history = address_history + [(peer_host, 0, time.time())]
+
             peer = self.peers.setdefault(pid, PeerInfo(node_id=pid, host=peer_host, port=0))
             peer.writer = writer
             peer.last_seen = time.time()
             peer.signing_pub = ck.signing_pub_from_hex(msg["signing_pub"])
+            peer.address_history = address_history
             if self.audit is not None:
+                if reconnected_new_address:
+                    self.audit.log(
+                        module="network_os", action="peer_reconnected_new_address", node_id=self.node_id,
+                        details={
+                            "peer_node_id": pid,
+                            "previous_address": f"{existing.host}:{existing.port}",
+                            "new_address": f"{peer_host}:0",
+                        },
+                    )
                 self.audit.log(
                     module="network_os", action="handshake_accepted", node_id=self.node_id,
                     details={"peer_node_id": pid, "peer_host": peer_host},
