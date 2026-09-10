@@ -19,6 +19,13 @@ confident-looking file imply more than it's actually verified.
   `torch`, `torchvision`) are deliberately NOT in `requirements.txt` —
   installing a multi-GB CUDA toolchain isn't something CI or a normal
   `pip install -r requirements.txt` should do by default.
+- **`research_art_generator.py`'s `generate_network_art()`** — same
+  GPU dependency and same `diffusers`/`torch` status as
+  `lora_style_training.py`; loads that file's LoRA output if present.
+  `_build_art_prompt()`, the deterministic prompt-building half of
+  this file, IS fully tested (`tests/test_research_art_generator.py`)
+  since it needs no GPU — only the actual image generation is
+  unverified here.
 
 ## Documented as not implemented
 
@@ -79,16 +86,18 @@ this wasn't a security downgrade (verification stays on, just against
 a more complete/portable bundle) and shouldn't be reverted to "just
 use the default" without re-checking this specific failure mode.
 
-## TRUST.md references files that don't exist yet
+## TRUST.md references a file that still doesn't exist
 
 `TRUST.md`'s "What must stay open source" list names
 `signal_stats_bridge.py` and `research_art_generator.py` as examples
-of files that decide what's consented/hashed/local — neither exists
-in this repo. Flagged at the very start of this project's work in
-this repo and never resolved; noted here rather than silently edited
-out, since removing the reference would understate what TRUST.md's
-open-source commitment is meant to cover once those files (or
-equivalents) exist.
+of files that decide what's consented/hashed/local. `research_art_generator.py`
+now exists (see its own "ABSTRACTION BOUNDARY" docstring section,
+written specifically to satisfy this TRUST.md reference) — only
+`signal_stats_bridge.py` is still missing. Flagged at the very start
+of this project's work in this repo; noted here rather than silently
+edited out of TRUST.md, since removing the reference would understate
+what TRUST.md's open-source commitment is meant to cover once that
+file (or an equivalent) exists too.
 
 ## Design choices that look like gaps but aren't
 
