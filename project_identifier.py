@@ -51,6 +51,7 @@ PROJECT_FILES = [
     "maxwell_chain_agent.py", "integrated_maxwell_agent.py",
     "audit_trail.py", "token_ledger.py", "ai_gossip.py",
     "integrated_research_agent.py", "crispr_guide_design.py", "crispr_research_suite.py",
+    "ptsd_research.py", "research_matcher.py", "multi_source_research.py", "extended_research_sources.py",
     "interop_client.go", "interop_client.rb", "interop_client.cpp",
     "interop_client.js", "interop_client.py", "JavaInteropClient.java",
     "project_identifier.py",

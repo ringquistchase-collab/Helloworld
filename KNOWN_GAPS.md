@@ -55,6 +55,29 @@ confident-looking file imply more than it's actually verified.
   (result counts change over time as real new studies/papers appear).
   They've been verified by manual runs during development (see commit
   messages), not by an automated, repeatable test.
+- **Same applies to `maxwell_research.py`, `research_matcher.py`,
+  `multi_source_research.py`, and `extended_research_sources.py`**
+  (arXiv, ClinicalTrials.gov, PubMed, NIH RePORTER, Europe PMC) and
+  the file that ties three of them together, `ptsd_research.py` — all
+  verified by manual runs against the live APIs, none in the
+  automated suite, same reasoning as above.
+
+## Why certifi is a dependency
+
+`research_matcher.py`, `multi_source_research.py`,
+`extended_research_sources.py`, and `maxwell_research.py` all pass an
+explicit `ssl.create_default_context(cafile=certifi.where())` to
+their `urlopen()` calls instead of relying on the platform default.
+Found during development: `api.reporter.nih.gov`'s certificate chain
+verified fine via curl (which used Windows' native schannel/OS trust
+store) but failed Python's default OpenSSL trust store with
+`CERTIFICATE_VERIFY_FAILED` — the two stores don't necessarily agree,
+and this specific government API's chain was the case that surfaced
+it. certifi's bundle is a well-maintained, portable CA set that
+doesn't depend on what a given machine happens to have installed;
+this wasn't a security downgrade (verification stays on, just against
+a more complete/portable bundle) and shouldn't be reverted to "just
+use the default" without re-checking this specific failure mode.
 
 ## TRUST.md references files that don't exist yet
 

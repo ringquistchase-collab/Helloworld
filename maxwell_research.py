@@ -16,13 +16,19 @@ Usage
 """
 
 from __future__ import annotations
+import ssl
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 
+import certifi
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+# See extended_research_sources.py's comment on this same pattern: an
+# explicit certifi CA bundle is more portable than the platform default.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
@@ -30,7 +36,7 @@ def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
     url = f"{ARXIV_API}?{urllib.parse.urlencode(params)}"
 
     try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
+        with urllib.request.urlopen(url, timeout=15, context=_SSL_CONTEXT) as resp:
             xml_data = resp.read()
         root = ET.fromstring(xml_data)
 
