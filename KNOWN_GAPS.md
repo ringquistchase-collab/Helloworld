@@ -54,20 +54,33 @@ confident-looking file imply more than it's actually verified.
   `actions/setup-java`, apt-get for g++/openssl, Node is on the
   default runner already) is a reasonable follow-up, not done here to
   keep this round of work scoped to Python.
-- **`growing_research_agent.py` / `integrated_research_agent.py` /
-  `crispr_research_suite.py`'s live network paths are not covered by
-  the automated test suite.** They hit real external APIs
-  (ClinicalTrials.gov, PubMed, ClinVar, HGNC) — running those on every
-  CI push would be slow, rate-limit-sensitive, and non-deterministic
-  (result counts change over time as real new studies/papers appear).
-  They've been verified by manual runs during development (see commit
-  messages), not by an automated, repeatable test.
-- **Same applies to `maxwell_research.py`, `research_matcher.py`,
-  `multi_source_research.py`, and `extended_research_sources.py`**
-  (arXiv, ClinicalTrials.gov, PubMed, NIH RePORTER, Europe PMC) and
-  the file that ties three of them together, `ptsd_research.py` — all
-  verified by manual runs against the live APIs, none in the
-  automated suite, same reasoning as above.
+- **The *live* network round trips are still not covered by the
+  automated test suite.** `growing_research_agent.py` /
+  `integrated_research_agent.py` / `crispr_research_suite.py` hit real
+  external APIs (ClinicalTrials.gov, PubMed, ClinVar, HGNC) — actually
+  calling those on every CI push would be slow, rate-limit-sensitive,
+  and non-deterministic (result counts change as real new
+  studies/papers appear), so the live calls remain verified by manual
+  runs during development (see commit messages), not by CI.
+- **The *response parsing* for the fetchers IS now covered offline.**
+  `tests/test_growing_research_agent_fetchers.py` mocks the module's
+  `_http_get_json` and exercises the real parsing/sequencing of
+  `_fetch_pubmed`, `_fetch_clinicaltrials`, the two-step
+  `_fetch_clinvar` (including candidate-gene extraction and the
+  esummary-failure fallback), `_fetch_hgnc`, and the `_fetch_stjude`
+  no-op — deterministically, without touching the network.
+  `multi_source_research.py` (PubMed esearch+esummary) and
+  `extended_research_sources.py` (NIH RePORTER, Europe PMC) are
+  likewise covered by `tests/test_multi_source_research.py` and
+  `tests/test_extended_research_sources.py`, mocking
+  `urllib.request.urlopen`. What these guard is the field-mapping,
+  term-building, `max_results` slicing, and failure-returns-`[]`
+  behavior — i.e. regressions in *our* code, not the remote APIs.
+- **Still parsing-untested:** `maxwell_research.py`,
+  `research_matcher.py`, and `ptsd_research.py` (arXiv, plus the file
+  that ties three sources together) — verified by manual runs against
+  the live APIs, not yet covered by offline mocked tests. Reasonable
+  follow-up, same mocking pattern as the three test files above.
 
 ## Why certifi is a dependency
 
