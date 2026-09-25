@@ -76,11 +76,18 @@ confident-looking file imply more than it's actually verified.
   `urllib.request.urlopen`. What these guard is the field-mapping,
   term-building, `max_results` slicing, and failure-returns-`[]`
   behavior — i.e. regressions in *our* code, not the remote APIs.
-- **Still parsing-untested:** `maxwell_research.py`,
-  `research_matcher.py`, and `ptsd_research.py` (arXiv, plus the file
-  that ties three sources together) — verified by manual runs against
-  the live APIs, not yet covered by offline mocked tests. Reasonable
-  follow-up, same mocking pattern as the three test files above.
+- **`maxwell_research.py`, `research_matcher.py`, and `ptsd_research.py`
+  parsing is now covered offline too.** `tests/test_maxwell_research.py`
+  exercises the arXiv Atom-XML parsing, title-whitespace normalization,
+  empty feed, and the distinctive `[{"error": ...}]` failure shape (this
+  fetcher signals failure differently from the `[]`-returning ones).
+  `tests/test_research_matcher.py` covers ClinicalTrials.gov field
+  mapping, no-`nctId` skipping, `max_results` slicing, and the optional
+  `biomarker`/`recruiting_only` query params. `tests/test_ptsd_research.py`
+  stubs the four underlying fetchers to pin the aggregation shape, the
+  exact arguments passed to each source, and `format_results` rendering.
+  As with the others, these guard *our* parsing/orchestration, not the
+  live remote APIs.
 
 ## Why certifi is a dependency
 
