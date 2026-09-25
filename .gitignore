@@ -1,7 +1,9 @@
-# Runtime state written by digital_dna.py / network_os.py / run_all.py
+# Runtime state written by digital_dna.py / network_os.py / run_all.py / run_local_network.py
 *.dna.json
 dna_state.json
 network_ledger.json
+node_one_ledger.json
+node_two_ledger.json
 token_ledger.json
 research_store.json
 corpus.json
