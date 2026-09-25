@@ -106,18 +106,22 @@ this wasn't a security downgrade (verification stays on, just against
 a more complete/portable bundle) and shouldn't be reverted to "just
 use the default" without re-checking this specific failure mode.
 
-## TRUST.md references a file that still doesn't exist
+## TRUST.md's referenced boundary files now all exist (closed)
 
 `TRUST.md`'s "What must stay open source" list names
 `signal_stats_bridge.py` and `research_art_generator.py` as examples
-of files that decide what's consented/hashed/local. `research_art_generator.py`
-now exists (see its own "ABSTRACTION BOUNDARY" docstring section,
-written specifically to satisfy this TRUST.md reference) — only
-`signal_stats_bridge.py` is still missing. Flagged at the very start
-of this project's work in this repo; noted here rather than silently
-edited out of TRUST.md, since removing the reference would understate
-what TRUST.md's open-source commitment is meant to cover once that
-file (or an equivalent) exists too.
+of files that decide what's consented/hashed/local. Both now exist:
+`research_art_generator.py` (see its own "ABSTRACTION BOUNDARY"
+docstring section) and `signal_stats_bridge.py`, which enforces the
+EEG/hormone-telemetry boundary in code — `fold_signal_into_strand()`
+restricts the source to the `*_telemetry` channels in
+`ALLOWED_SOURCES`, summarizes raw readings to abstract stats, and
+folds ONLY a hash of those stats through `digital_dna.py`'s real
+consent gate (raw readings never reach the gate). Both are hashed by
+`project_identifier.py` and covered by the test suite
+(`tests/test_signal_stats_bridge.py`,
+`tests/test_research_art_generator.py`). This previously-open gap is
+closed.
 
 ## Design choices that look like gaps but aren't
 
