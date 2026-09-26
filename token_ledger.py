@@ -83,12 +83,14 @@ class TokenLedger:
     # transaction log, so balance()/history()/all_balances()/audit all keep
     # working unchanged. NOT a currency -- same "local score" meaning as
     # DAS/MOS elsewhere in this project.
-    def award(self, node_id: str, amount: int, reason: str) -> dict:
-        """Grant a positive number of contribution points. Refuses <= 0
-        (use credit() directly if you genuinely need a debit)."""
+    def award(self, node_id: str, amount: int, reason: str) -> float:
+        """Grant a positive number of contribution points and return the
+        node's NEW balance. Refuses <= 0 (use credit() directly if you
+        genuinely need a debit)."""
         if amount <= 0:
             raise ValueError("award() requires a positive amount")
-        return self.credit(node_id, amount, reason)
+        self.credit(node_id, amount, reason)
+        return self.balance(node_id)
 
     def leaderboard(self) -> list[tuple[str, float]]:
         """All known nodes sorted by balance, highest first."""

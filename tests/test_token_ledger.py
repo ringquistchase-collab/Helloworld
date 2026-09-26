@@ -54,6 +54,12 @@ def test_award_adds_points_via_the_transaction_log():
     assert len(ledger.history("node-a")) == 2
 
 
+def test_award_returns_new_balance():
+    ledger = TokenLedger()
+    assert ledger.award("node-a", 2, reason="x") == 2
+    assert ledger.award("node-a", 3, reason="y") == 5
+
+
 def test_award_rejects_non_positive():
     ledger = TokenLedger()
     with pytest.raises(ValueError):

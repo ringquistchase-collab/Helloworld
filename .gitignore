@@ -5,6 +5,7 @@ network_ledger.json
 node_one_ledger.json
 node_two_ledger.json
 token_ledger.json
+network_token_ledger.json
 research_store.json
 corpus.json
 crispr_store.json
