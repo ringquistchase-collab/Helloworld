@@ -47,7 +47,7 @@ import os
 PROJECT_FILES = [
     "digital_dna.py", "network_os.py", "crypto_layer.py",
     "growing_research_agent.py", "run_agent.py", "run_all.py", "run_local_network.py",
-    "live_helix_network.py", "self_and_research_helix_live.py",
+    "live_helix_network.py", "self_and_research_helix_live.py", "live_identity_network.py",
     "lora_style_training.py", "maxwell_style_images.py", "maxwell_research.py",
     "maxwell_chain_agent.py", "integrated_maxwell_agent.py",
     "audit_trail.py", "token_ledger.py", "ai_gossip.py",
