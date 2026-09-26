@@ -8,7 +8,10 @@ import os
 
 import pytest
 
-from dna_binary_codec import encode_to_dna, decode_from_dna, gc_content
+from dna_binary_codec import (
+    encode_to_dna, decode_from_dna, gc_content,
+    complement_strand, double_helix_view,
+)
 
 
 def test_empty_roundtrip():
@@ -79,3 +82,45 @@ def test_gc_content():
     assert gc_content("GCGC") == 1.0      # all G/C
     assert gc_content("ACGT") == 0.5      # G and C out of 4
     assert gc_content("acgt") == 0.5      # case-insensitive
+
+
+# -- Watson-Crick complementary strand --------------------------------------
+
+def test_complement_pairs():
+    assert complement_strand("ACGT") == "TGCA"   # A<->T, C<->G
+    assert complement_strand("AAAA") == "TTTT"
+
+
+def test_complement_is_its_own_inverse():
+    for s in ("ACGT", "GGCCAATT", "TACG"):
+        assert complement_strand(complement_strand(s)) == s
+
+
+def test_complement_rejects_invalid_symbol():
+    with pytest.raises(ValueError):
+        complement_strand("ACGX")
+
+
+def test_complement_equals_bitwise_not_of_bytes():
+    # complementing every base == flipping both bits of its 2-bit codon
+    # == a bitwise NOT of the underlying bytes. Verify on concrete data.
+    for sample in (b"\x00\xff\x0f\xf0", b"Hello", bytes(range(32))):
+        comp_dna = complement_strand(encode_to_dna(sample))
+        assert decode_from_dna(comp_dna) == bytes(b ^ 0xFF for b in sample)
+
+
+def test_double_helix_view_fields_and_relationship():
+    sample = b"Hello, DNA mirror."
+    helix = double_helix_view(sample)
+    assert helix["strand_5to3"] == encode_to_dna(sample)
+    assert len(helix["strand_complement_3to5"]) == len(helix["strand_5to3"])
+    assert helix["complement_equals_bitwise_not"] is True
+    assert helix["gc_content"] == gc_content(helix["strand_5to3"])
+
+
+def test_double_helix_view_empty():
+    helix = double_helix_view(b"")
+    assert helix["strand_5to3"] == ""
+    assert helix["strand_complement_3to5"] == ""
+    assert helix["complement_equals_bitwise_not"] is True
+    assert helix["gc_content"] == 0.0

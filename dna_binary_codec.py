@@ -61,6 +61,41 @@ def decode_from_dna(dna_sequence: str) -> bytes:
     return bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits), 8))
 
 
+WATSON_CRICK_COMPLEMENT = {"A": "T", "T": "A", "C": "G", "G": "C"}
+
+
+def complement_strand(dna_sequence: str) -> str:
+    """Real Watson-Crick complementary strand (A<->T, C<->G) — the second
+    strand of the double helix for this sequence.
+
+    This is not just decorative: because A=00/T=11 and C=01/G=10 in the
+    2-bit encoding above, complementing each base is exactly equivalent to
+    flipping both bits of its codon — which, across a whole sequence, is
+    exactly a bitwise NOT of the original bytes. That equivalence is
+    verified in the self-tests below, not just asserted here.
+    """
+    seq = dna_sequence.upper()
+    bad = set(seq) - set(WATSON_CRICK_COMPLEMENT)
+    if bad:
+        raise ValueError(f"Invalid DNA sequence: unexpected symbol(s) {sorted(bad)}.")
+    return "".join(WATSON_CRICK_COMPLEMENT[b] for b in seq)
+
+
+def double_helix_view(data: bytes) -> dict:
+    """Both strands of the helix for some bytes, plus the direct binary
+    relationship between them (complement bytes == bitwise NOT of data)."""
+    strand_5to3 = encode_to_dna(data)
+    strand_complement = complement_strand(strand_5to3)
+    complement_bytes = decode_from_dna(strand_complement)
+    bitwise_not_bytes = bytes(b ^ 0xFF for b in data)
+    return {
+        "strand_5to3": strand_5to3,
+        "strand_complement_3to5": strand_complement,
+        "complement_equals_bitwise_not": complement_bytes == bitwise_not_bytes,
+        "gc_content": gc_content(strand_5to3),
+    }
+
+
 def gc_content(dna_sequence: str) -> float:
     """Fraction of bases that are G or C (a standard real bioinformatics
     metric, computed here on the encoded letters — 0.0 if the sequence is
@@ -145,7 +180,20 @@ def _run_self_tests() -> None:
     check(f"all 20 random samples round-trip exactly (len=128 bases each)",
           random_failures == 0)
 
-    # 5. Error handling on invalid input
+    # 5. Double-helix complementary strand
+    print("\n[5] Double-helix complementary strand (real Watson-Crick pairing)")
+    for sample in [b"Hello, DNA mirror.", os.urandom(16), b"\x00\xff\x0f\xf0"]:
+        helix = double_helix_view(sample)
+        check(f"  complement strand length matches for {sample[:12]!r}...",
+              len(helix["strand_complement_3to5"]) == len(helix["strand_5to3"]))
+        check(f"  complement strand bytes == bitwise NOT of original for {sample[:12]!r}...",
+              helix["complement_equals_bitwise_not"])
+        # Complementing twice must return the original strand exactly
+        double_complement = complement_strand(helix["strand_complement_3to5"])
+        check(f"  complementing twice restores original strand for {sample[:12]!r}...",
+              double_complement == helix["strand_5to3"])
+
+    # 5b. Error handling on invalid input
     print("\n[5] Error handling")
     try:
         decode_from_dna("ACGX")
