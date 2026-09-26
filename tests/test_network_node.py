@@ -46,8 +46,10 @@ async def test_handshake_gossip_verify_award_and_chain(tmp_path):
         assert ok and len(n0.chain.blocks) == 1
 
         # a real per-peer session key was established (not a shared constant)
-        assert n0.sessions[19552].handshake_done is True
-        assert n0.sessions[19552].session_key is not None and len(n0.sessions[19552].session_key) == 32
+        out = n0.outbound[("127.0.0.1", 19552)]
+        assert out.handshake_done is True and out.peer_node_id == 1
+        assert out.session_key is not None and len(out.session_key) == 32
+        assert n1.inbound[0].session_key == out.session_key
 
         # mining was recorded through the real consent gate as network_mining
         assert len(n0.dna.audit_trail("network_mining")) == 1
@@ -134,7 +136,7 @@ async def test_impostor_handshake_with_changed_key_is_rejected(tmp_path):
     try:
         await impostor.mine_and_gossip()
         await asyncio.sleep(0.4)
-        assert impostor.sessions[19561].handshake_done is False
+        assert ("127.0.0.1", 19561) not in impostor.outbound
         assert n1.blocks_received == 0
         assert ledger.balance("node-0") == 0
     finally:
@@ -206,14 +208,9 @@ async def test_replay_over_the_wire_is_not_awarded(tmp_path):
 
         # resend the exact block n0 already gossiped, over the real session
         block = n0.chain.blocks[-1].payload
-        session = n0.sessions[19571]
-        frame = aead_encrypt(session.session_key, json.dumps(block).encode(), aad=b"19570->19571")
-        payload = (19570).to_bytes(4, "big") + frame
-        reader, writer = await asyncio.open_connection("127.0.0.1", 19571)
-        writer.write(b"B" + len(payload).to_bytes(4, "big") + payload)
-        await writer.drain()
-        writer.close(); await writer.wait_closed()
-        await asyncio.sleep(0.4)
+        addr = ("127.0.0.1", 19571)
+        assert await n0._send_block(addr, n0.outbound[addr], block) == b"k"
+        await asyncio.sleep(0.2)
 
         assert n1.blocks_received == 2
         assert ledger.balance("node-0") == 1
@@ -273,16 +270,13 @@ async def test_block_relayed_by_another_peer_is_dropped(tmp_path):
         # can stop it (the replay set alone wouldn't)
         from crypto_layer import sign
         from network_node import block_signing_bytes
-        assert await n2._ensure_handshake(19576)
+        addr = ("127.0.0.1", 19576)
+        session = await n2._ensure_handshake(addr)
+        assert session is not None
         block = dict(_signed_block(n0, index=2), boot_id=n0.boot_id)
         block["sig"] = sign(n0.signing_priv, block_signing_bytes(block)).hex()
-        frame = aead_encrypt(n2.sessions[19576].session_key, json.dumps(block).encode(), aad=b"19577->19576")
-        payload = (19577).to_bytes(4, "big") + frame
-        reader, writer = await asyncio.open_connection("127.0.0.1", 19576)
-        writer.write(b"B" + len(payload).to_bytes(4, "big") + payload)
-        await writer.drain()
-        writer.close(); await writer.wait_closed()
-        await asyncio.sleep(0.3)
+        await n2._send_block(addr, session, block)
+        await asyncio.sleep(0.2)
 
         assert n1.blocks_received == 2
         assert ledger.balance("node-0") == 1
@@ -354,3 +348,93 @@ def test_corrupt_known_peers_file_raises_and_is_kept(tmp_path):
         with pytest.raises(ValueError):
             NetworkNode(1, 19587, [], dna, IDENTITY, ledger, str(tmp_path), known_peers_path=str(peers_path))
         assert peers_path.read_text(encoding="utf-8") == bad
+
+
+@pytest.mark.asyncio
+async def test_nodes_on_the_same_port_different_hosts(tmp_path):
+    # Two "machines" both listening on the same port: 127.0.0.1 and
+    # 127.0.0.2 are distinct loopback addresses on Windows and Linux.
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    dna = _node(9, 19599, [], tmp_path, ledger).dna
+    (tmp_path / "b").mkdir()
+    a = NetworkNode(0, 19590, None, dna, IDENTITY, ledger, str(tmp_path),
+                    peers=[("127.0.0.2", 19590)], bind_host="127.0.0.1")
+    b = NetworkNode(1, 19590, None, dna, IDENTITY, ledger, str(tmp_path / "b"),
+                    peers=[("127.0.0.1", 19590)], bind_host="127.0.0.2")
+    try:
+        await b.start_server()
+    except OSError:
+        pytest.skip("127.0.0.2 loopback not available on this machine")
+    await a.start_server()
+    try:
+        await a.mine_and_gossip()
+        await b.mine_and_gossip()
+        await asyncio.sleep(0.3)
+        assert ledger.balance("node-0") == 1 and ledger.balance("node-1") == 1
+    finally:
+        a.server.close(); await a.server.wait_closed()
+        b.server.close(); await b.server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_handshakes_leave_both_directions_working(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    n0 = _node(0, 19591, [19592], tmp_path, ledger)
+    n1 = _node(1, 19592, [19591], tmp_path, ledger)
+    await n0.start_server(); await n1.start_server()
+    try:
+        await asyncio.gather(n0.mine_and_gossip(), n1.mine_and_gossip())
+        await asyncio.sleep(0.3)
+        await asyncio.gather(n0.mine_and_gossip(), n1.mine_and_gossip())
+        await asyncio.sleep(0.3)
+        assert ledger.balance("node-0") == 2 and ledger.balance("node-1") == 2
+    finally:
+        n0.server.close(); await n0.server.wait_closed()
+        n1.server.close(); await n1.server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_sender_rehandshakes_after_receiver_restart(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    key = os.path.join(str(tmp_path), "keys", "node-1.ed25519.pem")
+    n0 = _node(0, 19593, [19594], tmp_path, ledger)
+    n1 = NetworkNode(1, 19594, [19593], n0.dna, IDENTITY, ledger, str(tmp_path), signing_key_path=key)
+    await n1.start_server()
+    await n0.mine_and_gossip()
+    await asyncio.sleep(0.2)
+    assert ledger.balance("node-0") == 1
+    n1.server.close(); await n1.server.wait_closed()
+
+    # n1 "restarts": same node_id, new process state, no inbound sessions
+    (tmp_path / "restart").mkdir()
+    n1b = NetworkNode(1, 19594, [19593], n0.dna, IDENTITY, ledger, str(tmp_path / "restart"),
+                      signing_key_path=key)   # same saved key, fresh sessions
+    await n1b.start_server()
+    try:
+        await n0.mine_and_gossip()   # stale session -> "n" -> re-handshake -> resend
+        await asyncio.sleep(0.2)
+        assert ledger.balance("node-0") == 2
+    finally:
+        n1b.server.close(); await n1b.server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_oversized_frame_and_silent_connection_are_dropped(tmp_path, monkeypatch):
+    import network_node
+    monkeypatch.setattr(network_node, "READ_TIMEOUT_SECONDS", 0.3)
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    n1 = _node(1, 19595, [], tmp_path, ledger)
+    await n1.start_server()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", 19595)
+        writer.write(b"B" + (network_node.MAX_BLOCK_FRAME_BYTES + 1).to_bytes(4, "big"))
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), timeout=2) == b""   # closed, nothing read
+        writer.close()
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", 19595)
+        assert await asyncio.wait_for(reader.read(), timeout=2) == b""   # idle -> timed out, closed
+        writer.close()
+        assert n1.blocks_received == 0
+    finally:
+        n1.server.close(); await n1.server.wait_closed()

@@ -25,6 +25,14 @@ Replaces the four overlapping live_*.py demo scripts with one class:
   - pluggable "enrichers": async functions that add real external data to a
     block on a schedule (research lookups, external-chain reads) —
     swap/add enrichers without touching the node's core logic
+  - multi-host: peers are (host, port) pairs and the listener binds to
+    bind_host, so nodes on different machines can all use the same port.
+    Sessions are one per direction: a node sends over the session IT
+    initiated to a peer's address, and receives over the session the peer
+    initiated, looked up by the peer's handshake-authenticated node_id. A
+    receiver that has no session for a sender (e.g. it restarted) answers
+    "n" and the sender re-handshakes. Connect/read timeouts and a frame
+    size cap keep one bad connection from stalling or exhausting a node.
 
 Honest scope note: consensus/fork-resolution across nodes is NOT
 implemented here (see chain_store.py's docstring) — each node keeps its
@@ -35,7 +43,8 @@ this uses the project's real modules, so it imports DigitalDNA from
 digital_dna.py, gets a raw-bytes X25519 public key via
 crypto_layer.generate_exchange_keypair_raw(), and records mining through
 the real consent gate under the "network_mining" source (added to
-digital_dna.ALLOWED_SOURCES). All localhost-only, all self-stopping.
+digital_dna.ALLOWED_SOURCES). Localhost-only by default (bind_host and
+peer hosts default to 127.0.0.1); see run_node_cli.py for multi-machine use.
 """
 
 from __future__ import annotations
@@ -49,6 +58,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from dna_binary_codec import encode_to_dna, decode_from_dna, complement_strand
+from cryptography.exceptions import InvalidTag
+
 from crypto_layer import (
     generate_exchange_keypair_raw, derive_shared_key, aead_encrypt, aead_decrypt,
     generate_signing_keypair, load_or_create_signing_keypair,
@@ -66,6 +77,14 @@ BLOCK_SIG_CONTEXT = b"dna-chain-project/block-sig/v1|"
 # X25519 pub(32) + Ed25519 pub(32) + Ed25519 sig(64)
 HANDSHAKE_BODY_LEN = 4 + 4 + 32 + 32 + 64
 
+CONNECT_TIMEOUT_SECONDS = 5.0
+READ_TIMEOUT_SECONDS = 10.0
+MAX_BLOCK_FRAME_BYTES = 1 << 20   # 1 MiB; real blocks are a few KB
+
+# 1-byte status a receiver writes back after a block frame
+STATUS_OK = b"k"
+STATUS_NO_SESSION = b"n"   # unknown sender session or undecryptable: re-handshake
+
 
 def _handshake_signed_bytes(node_id: int, port: int, exchange_pub: bytes) -> bytes:
     return HANDSHAKE_SIG_CONTEXT + node_id.to_bytes(4, "big") + port.to_bytes(4, "big") + exchange_pub
@@ -78,9 +97,12 @@ def block_signing_bytes(block: dict) -> bytes:
     return BLOCK_SIG_CONTEXT + json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _block_aad(sender_id: int, receiver_id: int) -> bytes:
+    return f"node-{sender_id}->node-{receiver_id}".encode()
+
+
 @dataclass
 class PeerSession:
-    port: int
     session_key: Optional[bytes] = None
     handshake_done: bool = False
     peer_node_id: Optional[int] = None   # authenticated by the signed handshake
@@ -91,7 +113,7 @@ class NetworkNode:
         self,
         node_id: int,
         port: int,
-        peer_ports: list[int],
+        peer_ports: Optional[list[int]],
         dna: DigitalDNA,
         identity_strand: str,
         ledger: TokenLedger,
@@ -102,11 +124,18 @@ class NetworkNode:
         signing_key_path: Optional[str] = None,
         signing_key_passphrase: Optional[bytes] = None,
         known_peers_path: Optional[str] = None,
+        peers: Optional[list[tuple[str, int]]] = None,
+        bind_host: str = "127.0.0.1",
     ):
         self.node_id = node_id
         self.node_key = f"node-{node_id}"
         self.port = port
-        self.peer_ports = peer_ports
+        self.bind_host = bind_host
+        # peers (host, port) takes precedence; peer_ports is the
+        # localhost shorthand used by run_consolidated_network.py
+        self.peers: list[tuple[str, int]] = (
+            list(peers) if peers is not None else [("127.0.0.1", p) for p in (peer_ports or [])]
+        )
         self.dna = dna
         # Frozen for the duration of this run — see the note in
         # mine_and_gossip() on why the broadcast/verified identity must be
@@ -136,8 +165,12 @@ class NetworkNode:
         self.require_known_peers = require_known_peers
         # (origin node_id, boot_id) -> block indices already accepted
         self.accepted_indices: dict[tuple[int, Optional[str]], set[int]] = {}
-        self.peer_pub_by_port: dict[int, bytes] = {}
-        self.sessions: dict[int, PeerSession] = {p: PeerSession(port=p) for p in peer_ports}
+        # sessions WE initiated, by peer address (used to send), and
+        # sessions peers initiated, by their authenticated node_id (used to
+        # receive). One per direction, so simultaneous handshakes between
+        # two nodes can't leave them holding different keys.
+        self.outbound: dict[tuple[str, int], PeerSession] = {}
+        self.inbound: dict[int, PeerSession] = {}
 
         self.block_counter = 0
         self.blocks_received = 0
@@ -240,42 +273,52 @@ class NetworkNode:
 
     # -- server side --
 
+    async def _read(self, reader: asyncio.StreamReader, n: int) -> bytes:
+        return await asyncio.wait_for(reader.readexactly(n), timeout=READ_TIMEOUT_SECONDS)
+
     async def handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
-            msg_type = (await reader.readexactly(1)).decode()
+            msg_type = await self._read(reader, 1)
 
-            if msg_type == "H":  # signed handshake: port, node_id, X25519 pub, Ed25519 pub, sig
-                body = await reader.readexactly(HANDSHAKE_BODY_LEN)
+            if msg_type == b"H":  # signed handshake: port, node_id, X25519 pub, Ed25519 pub, sig
+                body = await self._read(reader, HANDSHAKE_BODY_LEN)
                 checked = self._check_handshake_body(body)
                 if checked is None:
                     self.log("<- handshake with bad signature or unpinned/changed signing key, dropping")
                     return
-                origin_port, their_node_id, their_pub = checked
-                self.peer_pub_by_port[origin_port] = their_pub
-                session_key = derive_shared_key(self.my_priv, their_pub, HANDSHAKE_CONTEXT)
-                if origin_port not in self.sessions:
-                    self.sessions[origin_port] = PeerSession(port=origin_port)
-                self.sessions[origin_port].session_key = session_key
-                self.sessions[origin_port].handshake_done = True
-                self.sessions[origin_port].peer_node_id = their_node_id
+                _, their_node_id, their_pub = checked
+                self.inbound[their_node_id] = PeerSession(
+                    session_key=derive_shared_key(self.my_priv, their_pub, HANDSHAKE_CONTEXT),
+                    handshake_done=True,
+                    peer_node_id=their_node_id,
+                )
                 # reply with our own signed handshake so the initiator can
                 # verify us and derive the same key
                 writer.write(b"h" + self._handshake_body())
                 await writer.drain()
 
-            elif msg_type == "B":  # encrypted block
-                header = await reader.readexactly(4)
-                length = int.from_bytes(header, "big")
-                frame_with_port = await reader.readexactly(length)
-                origin_port = int.from_bytes(frame_with_port[:4], "big")
-                frame = frame_with_port[4:]
-
-                session = self.sessions.get(origin_port)
-                if not session or not session.handshake_done:
-                    self.log(f"<- block from unknown/unshaken peer :{origin_port}, dropping")
+            elif msg_type == b"B":  # encrypted block: sender node_id(4) + AEAD frame
+                length = int.from_bytes(await self._read(reader, 4), "big")
+                if not 4 <= length <= MAX_BLOCK_FRAME_BYTES:
+                    self.log(f"<- block frame of {length} bytes out of bounds, dropping")
                     return
+                frame_with_sender = await self._read(reader, length)
+                sender_id = int.from_bytes(frame_with_sender[:4], "big")
+                frame = frame_with_sender[4:]
 
-                plaintext = aead_decrypt(session.session_key, frame, aad=f"{origin_port}->{self.port}".encode())
+                session = self.inbound.get(sender_id)
+                try:
+                    if not session or not session.handshake_done:
+                        raise LookupError
+                    plaintext = aead_decrypt(session.session_key, frame, aad=_block_aad(sender_id, self.node_id))
+                except (LookupError, InvalidTag):
+                    self.log(f"<- block from node-{sender_id} with no usable session, asking it to re-handshake")
+                    writer.write(STATUS_NO_SESSION)
+                    await writer.drain()
+                    return
+                writer.write(STATUS_OK)
+                await writer.drain()
+
                 block = json.loads(plaintext.decode())
                 self.blocks_received += 1
                 if block.get("origin") != session.peer_node_id:
@@ -285,7 +328,7 @@ class NetworkNode:
                     )
                     return
                 self._verify_and_process(block)
-        except (asyncio.IncompleteReadError, ConnectionResetError):
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionResetError):
             pass
         except Exception as e:
             self.log(f"handle_conn error: {e}")
@@ -329,34 +372,61 @@ class NetworkNode:
             )
 
     async def start_server(self):
-        self.server = await asyncio.start_server(self.handle_conn, "127.0.0.1", self.port)
+        self.server = await asyncio.start_server(self.handle_conn, self.bind_host, self.port)
 
     # -- client side: handshake + gossip --
 
-    async def _ensure_handshake(self, peer_port: int) -> bool:
-        session = self.sessions.setdefault(peer_port, PeerSession(port=peer_port))
-        if session.handshake_done:
-            return True
+    async def _connect(self, addr: tuple[str, int]):
+        return await asyncio.wait_for(asyncio.open_connection(*addr), timeout=CONNECT_TIMEOUT_SECONDS)
+
+    async def _ensure_handshake(self, addr: tuple[str, int]) -> Optional[PeerSession]:
+        """Outbound session to the peer at addr, handshaking if needed.
+        Returns None if the peer is unreachable or fails verification."""
+        session = self.outbound.get(addr)
+        if session and session.handshake_done:
+            return session
+        host, port = addr
+        writer = None
         try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", peer_port)
+            reader, writer = await self._connect(addr)
             writer.write(b"H" + self._handshake_body())
             await writer.drain()
-            reply = await reader.readexactly(1 + HANDSHAKE_BODY_LEN)
+            reply = await self._read(reader, 1 + HANDSHAKE_BODY_LEN)
             checked = self._check_handshake_body(reply[1:]) if reply[:1] == b"h" else None
-            if checked is None or checked[0] != peer_port:
+            if checked is None or checked[0] != port:
+                self.log(f"handshake reply from {host}:{port} failed signature/key check, not sending")
+                return None
+            session = PeerSession(
+                session_key=derive_shared_key(self.my_priv, checked[2], HANDSHAKE_CONTEXT),
+                handshake_done=True,
+                peer_node_id=checked[1],
+            )
+            self.outbound[addr] = session
+            self.log(f"real X25519 handshake complete with node-{checked[1]} at {host}:{port}")
+            return session
+        except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+            return None
+        finally:
+            if writer is not None:
                 writer.close()
-                self.log(f"handshake reply from :{peer_port} failed signature/key check, not sending")
-                return False
-            session.peer_node_id = checked[1]
-            their_pub = checked[2]
-            session.session_key = derive_shared_key(self.my_priv, their_pub, HANDSHAKE_CONTEXT)
-            session.handshake_done = True
-            writer.close()
-            await writer.wait_closed()
-            self.log(f"real X25519 handshake complete with peer :{peer_port}")
-            return True
-        except (ConnectionRefusedError, OSError, asyncio.IncompleteReadError):
-            return False
+
+    async def _send_block(self, addr: tuple[str, int], session: PeerSession, block: dict) -> Optional[bytes]:
+        """Send one encrypted block frame; returns the receiver's 1-byte
+        status, or None if the send failed."""
+        frame = aead_encrypt(session.session_key, json.dumps(block).encode(),
+                             aad=_block_aad(self.node_id, session.peer_node_id))
+        payload = self.node_id.to_bytes(4, "big") + frame
+        writer = None
+        try:
+            reader, writer = await self._connect(addr)
+            writer.write(b"B" + len(payload).to_bytes(4, "big") + payload)
+            await writer.drain()
+            return await asyncio.wait_for(reader.read(1), timeout=READ_TIMEOUT_SECONDS)
+        except (OSError, asyncio.TimeoutError):
+            return None
+        finally:
+            if writer is not None:
+                writer.close()
 
     async def mine_and_gossip(self):
         self.block_counter += 1
@@ -413,20 +483,20 @@ class NetworkNode:
         tag = " ".join(f"[{k}]" for k in enrichment)
         self.log(f"-> mined block #{self.block_counter} hash={digest.hex()[:12]}... {tag}")
 
-        for peer_port in self.peer_ports:
-            if not await self._ensure_handshake(peer_port):
+        for addr in self.peers:
+            session = await self._ensure_handshake(addr)
+            if session is None:
                 continue
-            session = self.sessions[peer_port]
-            frame = aead_encrypt(session.session_key, json.dumps(block).encode(), aad=f"{self.port}->{peer_port}".encode())
-            payload = self.port.to_bytes(4, "big") + frame
-            try:
-                reader, writer = await asyncio.open_connection("127.0.0.1", peer_port)
-                writer.write(b"B" + len(payload).to_bytes(4, "big") + payload)
-                await writer.drain()
-                writer.close()
-                await writer.wait_closed()
-            except (ConnectionRefusedError, OSError):
-                pass
+            status = await self._send_block(addr, session, block)
+            if status == STATUS_NO_SESSION:
+                # the peer lost our session (restart) -- handshake again, retry once
+                self.outbound.pop(addr, None)
+                session = await self._ensure_handshake(addr)
+                if session is not None:
+                    await self._send_block(addr, session, block)
+            elif status is None:
+                # unreachable: handshake afresh next time it's back
+                self.outbound.pop(addr, None)
 
     async def run(self, stop_event: asyncio.Event):
         await self.start_server()
