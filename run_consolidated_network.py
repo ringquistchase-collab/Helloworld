@@ -108,16 +108,26 @@ async def main():
             require_known_peers=True,
             signing_key_path=os.path.join(KEYS_DIR, f"node-{i}.ed25519.pem"),
             signing_key_passphrase=os.environ.get("DNA_NODE_KEY_PASSPHRASE", "").encode() or None,
+            known_peers_path=os.path.join(KEYS_DIR, f"node-{i}.known_peers.json"),
         )
         for i, p in enumerate(ports)
     ]
     # All three nodes are yours and start in this process, so pin every
     # node's Ed25519 signing key with every other node up front; an
     # unknown or changed signing key is then rejected rather than trusted.
-    for n in nodes:
-        for peer in nodes:
-            if peer is not n:
-                n.trust_peer(peer.node_id, peer.signing_pub_hex)
+    # Pins are saved per node, so if a node's key changed since the last
+    # run (e.g. its .pem was deleted and regenerated) the run stops here
+    # instead of quietly trusting the new key.
+    try:
+        for n in nodes:
+            for peer in nodes:
+                if peer is not n:
+                    n.trust_peer(peer.node_id, peer.signing_pub_hex)
+    except ValueError as e:
+        print(f"\nREFUSING TO START: {e}")
+        print("If that key change is intended, delete the keys/node-*.known_peers.json "
+              "files to re-pin every node's current key.")
+        raise SystemExit(1)
 
     stop_event = asyncio.Event()
     tasks = [asyncio.create_task(n.run(stop_event)) for n in nodes]

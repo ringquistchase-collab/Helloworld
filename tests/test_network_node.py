@@ -289,3 +289,68 @@ async def test_block_relayed_by_another_peer_is_dropped(tmp_path):
     finally:
         for n in (n0, n1, n2):
             n.server.close(); await n.server.wait_closed()
+
+
+def test_pins_are_saved_and_reloaded(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    peers_path = os.path.join(str(tmp_path), "keys", "node-1.known_peers.json")
+    n0 = _node(0, 19578, [], tmp_path, ledger)
+    dna = n0.dna
+
+    first = NetworkNode(1, 19579, [], dna, IDENTITY, ledger, str(tmp_path), known_peers_path=peers_path)
+    first.trust_peer(0, n0.signing_pub_hex)
+    second = NetworkNode(1, 19579, [], dna, IDENTITY, ledger, str(tmp_path), known_peers_path=peers_path)
+    assert second.peer_signing_keys == {0: n0.signing_pub_hex}
+
+    # the reloaded pin is enforced: a block signed by a different node-0 key fails
+    impostor = _node(0, 19580, [], tmp_path, ledger)
+    second._verify_and_process(_signed_block(impostor))
+    assert ledger.balance("node-0") == 0
+    second._verify_and_process(_signed_block(n0))
+    assert ledger.balance("node-0") == 1
+
+
+def test_trust_peer_refuses_a_changed_key_unless_replace(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    peers_path = os.path.join(str(tmp_path), "node-1.known_peers.json")
+    n0 = _node(0, 19581, [], tmp_path, ledger)
+    new_n0 = _node(0, 19582, [], tmp_path, ledger)
+
+    n1 = NetworkNode(1, 19583, [], n0.dna, IDENTITY, ledger, str(tmp_path), known_peers_path=peers_path)
+    n1.trust_peer(0, n0.signing_pub_hex)
+    n1.trust_peer(0, n0.signing_pub_hex)                     # same key again is fine
+    with pytest.raises(ValueError):
+        n1.trust_peer(0, new_n0.signing_pub_hex)
+    assert n1.peer_signing_keys[0] == n0.signing_pub_hex
+
+    n1.trust_peer(0, new_n0.signing_pub_hex, replace=True)
+    reloaded = NetworkNode(1, 19583, [], n0.dna, IDENTITY, ledger, str(tmp_path), known_peers_path=peers_path)
+    assert reloaded.peer_signing_keys[0] == new_n0.signing_pub_hex
+
+
+@pytest.mark.asyncio
+async def test_trust_on_first_use_pin_is_saved(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    peers_path = os.path.join(str(tmp_path), "node-1.known_peers.json")
+    n0 = _node(0, 19584, [19585], tmp_path, ledger)
+    n1 = NetworkNode(1, 19585, [19584], n0.dna, IDENTITY, ledger, str(tmp_path), known_peers_path=peers_path)
+
+    await n1.start_server()
+    try:
+        await n0.mine_and_gossip()
+        await asyncio.sleep(0.3)
+    finally:
+        n1.server.close(); await n1.server.wait_closed()
+    with open(peers_path, encoding="utf-8") as f:
+        assert json.load(f) == {"0": n0.signing_pub_hex}
+
+
+def test_corrupt_known_peers_file_raises_and_is_kept(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    peers_path = tmp_path / "node-1.known_peers.json"
+    dna = _node(0, 19586, [], tmp_path, ledger).dna
+    for bad in ('{"0": "not-hex"}', "[1, 2]", "{not json"):
+        peers_path.write_text(bad, encoding="utf-8")
+        with pytest.raises(ValueError):
+            NetworkNode(1, 19587, [], dna, IDENTITY, ledger, str(tmp_path), known_peers_path=str(peers_path))
+        assert peers_path.read_text(encoding="utf-8") == bad

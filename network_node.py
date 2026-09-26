@@ -101,6 +101,7 @@ class NetworkNode:
         require_known_peers: bool = False,
         signing_key_path: Optional[str] = None,
         signing_key_passphrase: Optional[bytes] = None,
+        known_peers_path: Optional[str] = None,
     ):
         self.node_id = node_id
         self.node_key = f"node-{node_id}"
@@ -128,7 +129,10 @@ class NetworkNode:
         # origin node_id -> pinned Ed25519 public key (hex). With
         # require_known_peers=True only keys added via trust_peer() are
         # accepted; otherwise the first key seen for a node_id is pinned.
-        self.peer_signing_keys: dict[int, str] = {}
+        # With known_peers_path, pins are loaded from and saved to that
+        # JSON file, so a peer whose key changes between runs is rejected.
+        self.known_peers_path = known_peers_path
+        self.peer_signing_keys: dict[int, str] = self._load_known_peers()
         self.require_known_peers = require_known_peers
         # (origin node_id, boot_id) -> block indices already accepted
         self.accepted_indices: dict[tuple[int, Optional[str]], set[int]] = {}
@@ -144,9 +148,46 @@ class NetworkNode:
 
     # -- signing keys --
 
-    def trust_peer(self, node_id: int, signing_pub_hex: str) -> None:
-        """Pin a peer's Ed25519 public key ahead of time (out-of-band)."""
+    def _load_known_peers(self) -> dict[int, str]:
+        """Read saved pins. A file that exists but can't be parsed raises
+        ValueError instead of being treated as empty, since that would
+        silently drop every pin and re-trust whatever key shows up next."""
+        if not self.known_peers_path or not os.path.exists(self.known_peers_path):
+            return {}
+        try:
+            with open(self.known_peers_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            pins = {int(k): str(v) for k, v in raw.items()}
+            for v in pins.values():
+                signing_pub_from_hex(v)
+        except (OSError, ValueError, AttributeError) as e:
+            raise ValueError(f"could not load known peers from {self.known_peers_path}: {e}") from e
+        return pins
+
+    def _save_known_peers(self) -> None:
+        if not self.known_peers_path:
+            return
+        os.makedirs(os.path.dirname(os.path.abspath(self.known_peers_path)), exist_ok=True)
+        tmp_path = self.known_peers_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in sorted(self.peer_signing_keys.items())}, f, indent=2)
+        os.replace(tmp_path, self.known_peers_path)
+
+    def trust_peer(self, node_id: int, signing_pub_hex: str, replace: bool = False) -> None:
+        """Pin a peer's Ed25519 public key ahead of time (out-of-band).
+        Raises ValueError if a DIFFERENT key is already pinned for that
+        node_id, unless replace=True -- a changed key is exactly what
+        pinning exists to catch, so replacing one must be deliberate."""
+        pinned = self.peer_signing_keys.get(node_id)
+        if pinned == signing_pub_hex:
+            return
+        if pinned is not None and not replace:
+            raise ValueError(
+                f"node-{node_id}'s signing key differs from the one pinned for it "
+                f"({pinned[:16]}... vs {signing_pub_hex[:16]}...)"
+            )
         self.peer_signing_keys[node_id] = signing_pub_hex
+        self._save_known_peers()
 
     def _pin_or_check(self, node_id: int, signing_pub_hex: str) -> bool:
         pinned = self.peer_signing_keys.get(node_id)
@@ -155,6 +196,7 @@ class NetworkNode:
         if self.require_known_peers or node_id == self.node_id:
             return False
         self.peer_signing_keys[node_id] = signing_pub_hex  # trust on first use
+        self._save_known_peers()
         return True
 
     def _handshake_body(self) -> bytes:
