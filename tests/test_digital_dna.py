@@ -78,3 +78,25 @@ def test_dna_report_fields_and_verifier(tmp_path):
     assert DigitalDNA.verify_dna_mirror_matches_hex(rep["strand_hex"], rep["strand_dna"]) is True
     # a mirror that doesn't decode to the same bytes is rejected
     assert DigitalDNA.verify_dna_mirror_matches_hex(rep["strand_hex"], "A" * 128) is False
+
+
+def test_new_identity_strand_is_seeded_not_blank(tmp_path):
+    a = _new_dna(tmp_path, "node-a")
+    b = _new_dna(tmp_path, "node-b")
+    assert a.as_dna() != "A" * 128
+    assert a.as_hex() != b.as_hex()
+
+
+def test_seeded_strand_persists_across_reload(tmp_path):
+    first = _new_dna(tmp_path)
+    second = _new_dna(tmp_path)
+    assert second.as_hex() == first.as_hex()
+
+
+def test_legacy_file_without_strand_gets_seeded(tmp_path):
+    import json
+    path = os.path.join(str(tmp_path), "legacy.dna.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"seed_label": "legacy", "salt": "abc123", "created_at": 0.0}, f)
+    dna = DigitalDNA(seed_label="legacy", dna_path=path)
+    assert any(bytes.fromhex(dna.as_hex()))

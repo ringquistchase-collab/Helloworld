@@ -192,14 +192,27 @@ class DigitalDNA:
                 data = json.load(f)
             if "strand_hex" in data:
                 self.strand = bytes.fromhex(data["strand_hex"])
+            # Old identity files (no strand_hex) and files saved before
+            # strands were seeded (all-zero strand) get the seeded strand
+            # instead of the shared blank one.
+            if not any(self.strand):
+                self.strand = self._seed_strand(data.get("seed_label", self.seed_label), data["salt"])
             self.history = [MutationEvent(**e) for e in data.get("history", [])]
             self.blocks = data.get("blocks", [])
             return data["salt"], data["created_at"]
 
         salt = uuid.uuid4().hex
         created_at = time.time()
+        self.strand = self._seed_strand(self.seed_label, salt)
         self._write(salt, created_at)
         return salt, created_at
+
+    @staticmethod
+    def _seed_strand(seed_label: str, salt: str) -> bytes:
+        # Starting strand for a new identity: unique per (seed_label, salt)
+        # rather than 32 zero bytes shared by every identity.
+        digest = hashlib.sha256(f"strand:{seed_label}:{salt}".encode("utf-8")).digest()
+        return (digest * (STRAND_BYTES // len(digest) + 1))[:STRAND_BYTES]
 
     def _derive_node_id(self) -> str:
         digest = hashlib.sha256(f"{self.seed_label}:{self.salt}".encode("utf-8")).hexdigest()
