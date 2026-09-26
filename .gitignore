@@ -8,6 +8,7 @@ token_ledger.json
 network_token_ledger.json
 network_token_ledger_external.json
 chain_node-*.json
+consolidated_run/
 research_store.json
 corpus.json
 crispr_store.json
