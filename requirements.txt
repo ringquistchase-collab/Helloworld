@@ -3,6 +3,7 @@ matplotlib>=3.11.0
 numpy>=2.5.0
 biopython>=1.88
 certifi>=2026.7.22
+requests>=2.32.0
 
 # testing
 pytest>=9.1.0
