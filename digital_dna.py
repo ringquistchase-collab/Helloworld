@@ -85,6 +85,8 @@ import time
 import uuid
 from dataclasses import dataclass, asdict
 
+from dna_binary_codec import encode_to_dna, decode_from_dna, gc_content
+
 
 STRAND_BITS = 256
 STRAND_BYTES = STRAND_BITS // 8
@@ -380,6 +382,37 @@ class DigitalDNA:
 
     def as_hex(self) -> str:
         return self.strand.hex()
+
+    # ---- DNA-letter mirror of the strand (dna_binary_codec.py) ----
+    # Additive only: these expose the SAME strand bytes as as_hex(), just
+    # mirrored to an A/C/G/T alphabet via dna_binary_codec.encode_to_dna().
+    # This is an exact, reversible ENCODING of the strand bytes, not a
+    # biological claim (see dna_binary_codec.py's own docstring). Nothing
+    # here changes the strand, the consent gate, ALLOWED_SOURCES, node_id,
+    # or the persisted state format.
+    def as_dna(self) -> str:
+        """The current 256-bit strand as A/C/G/T letters. Exact inverse of
+        the hex form: decode_from_dna(as_dna()) == bytes.fromhex(as_hex())."""
+        return encode_to_dna(self.strand)
+
+    def dna_report(self) -> dict:
+        """Both representations of the current strand, plus GC content of
+        the letter form — computed once, for callers that want both without
+        recomputing."""
+        dna = encode_to_dna(self.strand)
+        return {
+            "node_id": self.node_id,
+            "strand_hex": self.strand.hex(),
+            "strand_dna": dna,
+            "dna_gc_content": gc_content(dna),
+            "dna_base_count": len(dna),
+        }
+
+    @staticmethod
+    def verify_dna_mirror_matches_hex(strand_hex: str, strand_dna: str) -> bool:
+        """For a peer (any OS/language) that receives both forms: confirm the
+        DNA-letter form decodes back to the exact bytes of the hex form."""
+        return decode_from_dna(strand_dna) == bytes.fromhex(strand_hex)
 
 
 # ----------------------------------------------------------------- #
