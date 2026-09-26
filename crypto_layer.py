@@ -63,7 +63,10 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.serialization import (
+    Encoding, PublicFormat, PrivateFormat, NoEncryption, BestAvailableEncryption,
+    load_pem_private_key,
+)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidSignature, InvalidTag
 
@@ -99,6 +102,39 @@ def verify(pub: Ed25519PublicKey, data: bytes, signature: bytes) -> bool:
         return True
     except InvalidSignature:
         return False
+
+
+def load_or_create_signing_keypair(
+    path: str, passphrase: bytes | None = None,
+) -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
+    """Persistent Ed25519 identity: loads the PKCS#8 PEM private key at
+    `path`, or generates one and writes it there (encrypted with
+    `passphrase` if given). An existing file that can't be loaded as an
+    Ed25519 key -- corrupt, wrong type, wrong passphrase -- raises
+    ValueError rather than being overwritten, since replacing it would
+    silently change the node's identity."""
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        try:
+            priv = load_pem_private_key(data, password=passphrase)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"could not load signing key from {path}: {e}") from e
+        if not isinstance(priv, Ed25519PrivateKey):
+            raise ValueError(f"{path} does not hold an Ed25519 private key")
+        return priv, priv.public_key()
+
+    priv = Ed25519PrivateKey.generate()
+    encryption = BestAvailableEncryption(passphrase) if passphrase else NoEncryption()
+    pem = priv.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, encryption)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    # O_EXCL: never clobber a key another process just wrote; 0o600 keeps
+    # it owner-only on POSIX (Windows ignores the mode; the user profile's
+    # ACLs apply instead).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(pem)
+    return priv, priv.public_key()
 
 
 # ----------------------------------------------------------------- #

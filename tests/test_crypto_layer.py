@@ -100,3 +100,33 @@ def test_context_scopes_the_key():
     assert ck.derive_shared_key(a_priv, b_pub, ctx1) == ck.derive_shared_key(b_priv, a_pub, ctx1)
     # different context -> different key from the same ECDH secret
     assert ck.derive_shared_key(a_priv, b_pub, ctx1) != ck.derive_shared_key(a_priv, b_pub, ctx2)
+
+
+def test_signing_key_persists_across_loads(tmp_path):
+    path = str(tmp_path / "keys" / "node.ed25519.pem")
+    _, pub1 = ck.load_or_create_signing_keypair(path)
+    priv2, pub2 = ck.load_or_create_signing_keypair(path)
+    assert ck.signing_pub_to_hex(pub1) == ck.signing_pub_to_hex(pub2)
+    assert ck.verify(pub1, b"msg", ck.sign(priv2, b"msg"))
+
+
+def test_encrypted_signing_key_needs_the_passphrase(tmp_path):
+    import pytest
+    path = str(tmp_path / "node.ed25519.pem")
+    _, pub = ck.load_or_create_signing_keypair(path, passphrase=b"correct horse")
+    assert b"ENCRYPTED" in open(path, "rb").read()
+    _, pub_again = ck.load_or_create_signing_keypair(path, passphrase=b"correct horse")
+    assert ck.signing_pub_to_hex(pub) == ck.signing_pub_to_hex(pub_again)
+    with pytest.raises(ValueError):
+        ck.load_or_create_signing_keypair(path, passphrase=b"wrong")
+    with pytest.raises(ValueError):
+        ck.load_or_create_signing_keypair(path)
+
+
+def test_corrupt_signing_key_file_is_not_overwritten(tmp_path):
+    import pytest
+    path = tmp_path / "node.ed25519.pem"
+    path.write_bytes(b"not a key")
+    with pytest.raises(ValueError):
+        ck.load_or_create_signing_keypair(str(path))
+    assert path.read_bytes() == b"not a key"

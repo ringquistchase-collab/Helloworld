@@ -7,7 +7,14 @@ Replaces the four overlapping live_*.py demo scripts with one class:
   - Ed25519-signed handshakes and blocks: each node has its own signing
     key, pinned per origin node_id by its peers (explicitly via
     trust_peer(), or trust-on-first-use), so a receiver can verify WHICH
-    node produced a block, not just that it knows the shared identity strand
+    node produced a block, not just that it knows the shared identity strand.
+    The key is per-process unless signing_key_path is given, in which case
+    it's loaded from / saved to that PEM file so the node keeps its identity
+    across runs.
+  - replay protection: a block must arrive over a session whose signed
+    handshake came from its origin, and each (origin, boot_id, index) earns
+    a token at most once (boot_id is random per node start, so a restarted
+    node's index counter starting over isn't mistaken for a replay)
   - identity routed through DigitalDNA's real consent gate
     (digital_dna.py) — every mined block is also recorded as a
     consent-gated "network_mining" signal, so the identity fingerprint
@@ -44,7 +51,8 @@ from typing import Callable, Optional
 from dna_binary_codec import encode_to_dna, decode_from_dna, complement_strand
 from crypto_layer import (
     generate_exchange_keypair_raw, derive_shared_key, aead_encrypt, aead_decrypt,
-    generate_signing_keypair, signing_pub_to_hex, signing_pub_from_hex, sign, verify,
+    generate_signing_keypair, load_or_create_signing_keypair,
+    signing_pub_to_hex, signing_pub_from_hex, sign, verify,
 )
 from chain_store import ChainStore
 from token_ledger import TokenLedger
@@ -75,6 +83,7 @@ class PeerSession:
     port: int
     session_key: Optional[bytes] = None
     handshake_done: bool = False
+    peer_node_id: Optional[int] = None   # authenticated by the signed handshake
 
 
 class NetworkNode:
@@ -90,6 +99,8 @@ class NetworkNode:
         mine_interval: float = 1.3,
         enrichers: Optional[list[Callable[[int], Optional[dict]]]] = None,
         require_known_peers: bool = False,
+        signing_key_path: Optional[str] = None,
+        signing_key_passphrase: Optional[bytes] = None,
     ):
         self.node_id = node_id
         self.node_key = f"node-{node_id}"
@@ -106,15 +117,21 @@ class NetworkNode:
         self.enrichers = enrichers or []
 
         self.my_priv, self.my_pub = generate_exchange_keypair_raw()
-        self.signing_priv, signing_pub = generate_signing_keypair()
+        if signing_key_path:
+            self.signing_priv, signing_pub = load_or_create_signing_keypair(
+                signing_key_path, signing_key_passphrase
+            )
+        else:
+            self.signing_priv, signing_pub = generate_signing_keypair()
+        self.boot_id = os.urandom(8).hex()
         self.signing_pub_hex = signing_pub_to_hex(signing_pub)
         # origin node_id -> pinned Ed25519 public key (hex). With
         # require_known_peers=True only keys added via trust_peer() are
         # accepted; otherwise the first key seen for a node_id is pinned.
         self.peer_signing_keys: dict[int, str] = {}
         self.require_known_peers = require_known_peers
-        # origin node_id -> block indices already accepted (replay protection)
-        self.accepted_indices: dict[int, set[int]] = {}
+        # (origin node_id, boot_id) -> block indices already accepted
+        self.accepted_indices: dict[tuple[int, Optional[str]], set[int]] = {}
         self.peer_pub_by_port: dict[int, bytes] = {}
         self.sessions: dict[int, PeerSession] = {p: PeerSession(port=p) for p in peer_ports}
 
@@ -150,10 +167,10 @@ class NetworkNode:
             + sig
         )
 
-    def _check_handshake_body(self, body: bytes) -> Optional[tuple[int, bytes]]:
-        """Verify a peer's handshake body. Returns (port, X25519 pub) if the
-        signature is valid and the signing key matches what is pinned for
-        that node_id, else None."""
+    def _check_handshake_body(self, body: bytes) -> Optional[tuple[int, int, bytes]]:
+        """Verify a peer's handshake body. Returns (port, node_id, X25519
+        pub) if the signature is valid and the signing key matches what is
+        pinned for that node_id, else None."""
         port = int.from_bytes(body[0:4], "big")
         node_id = int.from_bytes(body[4:8], "big")
         exchange_pub = body[8:40]
@@ -167,7 +184,7 @@ class NetworkNode:
             return None
         if not self._pin_or_check(node_id, signing_pub_hex):
             return None
-        return port, exchange_pub
+        return port, node_id, exchange_pub
 
     def _block_signature_ok(self, block: dict) -> bool:
         pinned = self.peer_signing_keys.get(block.get("origin"))
@@ -191,13 +208,14 @@ class NetworkNode:
                 if checked is None:
                     self.log("<- handshake with bad signature or unpinned/changed signing key, dropping")
                     return
-                origin_port, their_pub = checked
+                origin_port, their_node_id, their_pub = checked
                 self.peer_pub_by_port[origin_port] = their_pub
                 session_key = derive_shared_key(self.my_priv, their_pub, HANDSHAKE_CONTEXT)
                 if origin_port not in self.sessions:
                     self.sessions[origin_port] = PeerSession(port=origin_port)
                 self.sessions[origin_port].session_key = session_key
                 self.sessions[origin_port].handshake_done = True
+                self.sessions[origin_port].peer_node_id = their_node_id
                 # reply with our own signed handshake so the initiator can
                 # verify us and derive the same key
                 writer.write(b"h" + self._handshake_body())
@@ -218,6 +236,12 @@ class NetworkNode:
                 plaintext = aead_decrypt(session.session_key, frame, aad=f"{origin_port}->{self.port}".encode())
                 block = json.loads(plaintext.decode())
                 self.blocks_received += 1
+                if block.get("origin") != session.peer_node_id:
+                    self.log(
+                        f"<- block claiming origin node-{block.get('origin')} arrived over "
+                        f"node-{session.peer_node_id}'s session, dropping (relay/replay)"
+                    )
+                    return
                 self._verify_and_process(block)
         except (asyncio.IncompleteReadError, ConnectionResetError):
             pass
@@ -235,12 +259,13 @@ class NetworkNode:
         fully_verified = strand_ok and complement_ok and identity_ok and signature_ok
 
         origin_key = f"node-{block['origin']}"
-        # Replay protection: "index" is covered by the signature, so each
-        # (origin, index) pair can earn a token at most once. Only blocks
+        # Replay protection: "boot_id" and "index" are covered by the
+        # signature, so each (origin, boot_id, index) can earn a token at
+        # most once. Only blocks
         # that fully verified are recorded, so a forged copy can't burn an
         # index before the real block arrives.
         if fully_verified:
-            seen = self.accepted_indices.setdefault(block["origin"], set())
+            seen = self.accepted_indices.setdefault((block["origin"], block.get("boot_id")), set())
             if block["index"] in seen:
                 self.log(f"<- block #{block['index']} from {origin_key} REPLAYED, already accepted, no token")
                 return
@@ -280,7 +305,8 @@ class NetworkNode:
                 writer.close()
                 self.log(f"handshake reply from :{peer_port} failed signature/key check, not sending")
                 return False
-            their_pub = checked[1]
+            session.peer_node_id = checked[1]
+            their_pub = checked[2]
             session.session_key = derive_shared_key(self.my_priv, their_pub, HANDSHAKE_CONTEXT)
             session.handshake_done = True
             writer.close()
@@ -329,6 +355,7 @@ class NetworkNode:
 
         block = {
             "origin": self.node_id,
+            "boot_id": self.boot_id,
             "index": self.block_counter,
             "hash_hex": digest.hex(),
             "strand": strand,

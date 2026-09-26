@@ -220,3 +220,72 @@ async def test_replay_over_the_wire_is_not_awarded(tmp_path):
     finally:
         n0.server.close(); await n0.server.wait_closed()
         n1.server.close(); await n1.server.wait_closed()
+
+
+def test_signing_key_path_keeps_identity_across_restarts(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    key_path = os.path.join(str(tmp_path), "keys", "node-0.ed25519.pem")
+    first = NetworkNode(0, 19572, [], _node(9, 19599, [], tmp_path, ledger).dna, IDENTITY, ledger,
+                        str(tmp_path), signing_key_path=key_path)
+    second = NetworkNode(0, 19572, [], first.dna, IDENTITY, ledger, str(tmp_path), signing_key_path=key_path)
+    assert first.signing_pub_hex == second.signing_pub_hex
+    assert first.boot_id != second.boot_id
+
+
+def test_restarted_node_restarting_its_index_is_not_a_replay(tmp_path):
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    key_path = os.path.join(str(tmp_path), "keys", "node-0.ed25519.pem")
+    dna = _node(9, 19599, [], tmp_path, ledger).dna
+    n1 = _node(1, 19573, [], tmp_path, ledger)
+
+    before = NetworkNode(0, 19574, [], dna, IDENTITY, ledger, str(tmp_path), signing_key_path=key_path)
+    n1.trust_peer(0, before.signing_pub_hex)
+    old_block = dict(_signed_block(before, index=1), boot_id=before.boot_id)
+    from crypto_layer import sign
+    from network_node import block_signing_bytes
+    old_block["sig"] = sign(before.signing_priv, block_signing_bytes(old_block)).hex()
+    n1._verify_and_process(old_block)
+
+    after = NetworkNode(0, 19574, [], dna, IDENTITY, ledger, str(tmp_path), signing_key_path=key_path)
+    new_block = dict(_signed_block(after, index=1), boot_id=after.boot_id)
+    new_block["sig"] = sign(after.signing_priv, block_signing_bytes(new_block)).hex()
+    n1._verify_and_process(new_block)       # same index, new boot -> accepted
+    n1._verify_and_process(dict(old_block))  # old boot's block again -> replay
+    assert ledger.balance("node-0") == 2
+
+
+@pytest.mark.asyncio
+async def test_block_relayed_by_another_peer_is_dropped(tmp_path):
+    from crypto_layer import aead_encrypt
+    ledger = TokenLedger(store_path=os.path.join(str(tmp_path), "ledger.json"))
+    n0 = _node(0, 19575, [19576], tmp_path, ledger)
+    n1 = _node(1, 19576, [19575, 19577], tmp_path, ledger)
+    n2 = _node(2, 19577, [19576], tmp_path, ledger)
+
+    await n0.start_server(); await n1.start_server(); await n2.start_server()
+    try:
+        await n0.mine_and_gossip()
+        await asyncio.sleep(0.3)
+        assert ledger.balance("node-0") == 1
+
+        # n2 (a legitimately handshaken peer) relays a validly signed n0
+        # block that n1 has NOT seen yet, so only the origin/session check
+        # can stop it (the replay set alone wouldn't)
+        from crypto_layer import sign
+        from network_node import block_signing_bytes
+        assert await n2._ensure_handshake(19576)
+        block = dict(_signed_block(n0, index=2), boot_id=n0.boot_id)
+        block["sig"] = sign(n0.signing_priv, block_signing_bytes(block)).hex()
+        frame = aead_encrypt(n2.sessions[19576].session_key, json.dumps(block).encode(), aad=b"19577->19576")
+        payload = (19577).to_bytes(4, "big") + frame
+        reader, writer = await asyncio.open_connection("127.0.0.1", 19576)
+        writer.write(b"B" + len(payload).to_bytes(4, "big") + payload)
+        await writer.drain()
+        writer.close(); await writer.wait_closed()
+        await asyncio.sleep(0.3)
+
+        assert n1.blocks_received == 2
+        assert ledger.balance("node-0") == 1
+    finally:
+        for n in (n0, n1, n2):
+            n.server.close(); await n.server.wait_closed()

@@ -35,6 +35,10 @@ from token_ledger import TokenLedger
 from external_chain_bridge import build_external_info_snapshot
 
 WORKDIR = os.path.join(os.path.dirname(__file__), "consolidated_run")
+# Outside WORKDIR on purpose: WORKDIR is wiped every run, but the nodes'
+# Ed25519 signing keys are their lasting identity. Set
+# DNA_NODE_KEY_PASSPHRASE to encrypt newly created key files at rest.
+KEYS_DIR = os.path.join(os.path.dirname(__file__), "keys")
 BASE_PORT = 9501
 NODE_COUNT = 3
 RUN_SECONDS = 9.0
@@ -102,6 +106,8 @@ async def main():
             chain_dir=WORKDIR,
             enrichers=[research_enricher, external_info_enricher],
             require_known_peers=True,
+            signing_key_path=os.path.join(KEYS_DIR, f"node-{i}.ed25519.pem"),
+            signing_key_passphrase=os.environ.get("DNA_NODE_KEY_PASSPHRASE", "").encode() or None,
         )
         for i, p in enumerate(ports)
     ]
