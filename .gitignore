@@ -10,6 +10,7 @@ network_token_ledger_external.json
 chain_node-*.json
 consolidated_run/
 node_data/
+autonomous/
 
 # Node Ed25519 private signing keys -- never commit these
 keys/

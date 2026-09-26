@@ -76,10 +76,35 @@ BIOMARKER  = "BRCA1"
 python -m pytest -q
 ```
 
-As of this writing: **58 tests pass** offline in a few seconds. The
-tests deliberately do **not** hit the live external APIs (those are
-verified by manual runs — see [`KNOWN_GAPS.md`](KNOWN_GAPS.md)) so the
-suite stays fast and deterministic.
+As of this writing: **217 tests pass** in about a minute. The tests
+deliberately do **not** hit the live external APIs (those are verified
+by manual runs — see [`KNOWN_GAPS.md`](KNOWN_GAPS.md)) so the suite
+stays deterministic.
+
+## Running on its own (autonomous mode)
+
+`node_supervisor.py` keeps 3 nodes running on this PC (local-only,
+ports 9611-9613) and writes a report every day:
+
+```bash
+python node_supervisor.py --install     # start at every Windows logon, and start now
+python node_supervisor.py --status      # what's running
+python node_supervisor.py --report-now  # write a report now
+python node_supervisor.py --uninstall   # stop and remove the logon task
+```
+
+- Nodes split the recurring work between them (`work_sharing.py`): a
+  ClinicalTrials.gov lookup every 15 minutes, a Bitcoin/Ethereum
+  chain-tip read every 10, and one chain audit every 5 (nodes take turns
+  re-verifying each other's chains). Each job is assigned to one node;
+  if it's down or slow, the next node takes it over after 20 seconds.
+- A node that exits is restarted (5s, 10s, 20s ... up to 5 min apart).
+- Every day at 08:00 (or at the next logon if the PC was off) the
+  supervisor runs the test suite, writes `autonomous/reports/<date>.md`,
+  archives the day's chains/logs to `autonomous/archive/` (30 days kept)
+  and shows a Windows notification saying OK or what needs attention.
+- Everything lives under `autonomous/` (gitignored). Signing keys are in
+  `autonomous/node-N/keys/` and are never archived or deleted.
 
 ---
 

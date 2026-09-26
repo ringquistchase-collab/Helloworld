@@ -39,13 +39,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import os
+import time
 
 from network_node import NetworkNode
 from digital_dna import DigitalDNA
 from token_ledger import TokenLedger
 from dna_binary_codec import encode_to_dna
 from run_consolidated_network import research_enricher, external_info_enricher
+from work_sharing import WorkManager, WorkSchedule
 
 DEFAULT_IDENTITY_TEXT = "dna-chain-project default network"
 
@@ -105,7 +108,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-research", action="store_true", help="disable the ClinicalTrials.gov enricher")
     p.add_argument("--no-external-info", action="store_true", help="disable the Bitcoin/Ethereum enricher")
     p.add_argument("--workdir", default="./node_data", help="where this node's keys/chain/identity/token files live")
+    p.add_argument("--work-sharing", action="store_true",
+                   help="split research/chain-tip lookups and chain audits with the other nodes "
+                        "(replaces the per-block research/external enrichers)")
+    p.add_argument("--round-seconds", type=float, default=300.0, help="work-sharing round length")
+    p.add_argument("--takeover-seconds", type=float, default=20.0,
+                   help="how long each next-in-line node waits before taking over a job")
+    p.add_argument("--status-file", help="write this node's status JSON here every 30s and on exit")
+    p.add_argument("--stop-file", help="stop cleanly when this file appears (used by node_supervisor.py)")
     return p
+
+
+def write_status(node, path: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(node.status(), f, indent=2)
+    os.replace(tmp, path)
+
+
+async def watch(node, stop_event: asyncio.Event, status_file: str | None, stop_file: str | None) -> None:
+    """Writes the status file every 30s and stops the node when the stop
+    file appears."""
+    last_status = 0.0
+    while not stop_event.is_set():
+        if stop_file and os.path.exists(stop_file):
+            node.log("stop file found, stopping")
+            stop_event.set()
+            break
+        if status_file and time.time() - last_status >= 30:
+            try:
+                write_status(node, status_file)
+            except OSError as e:
+                node.log(f"could not write status file: {e}")
+            last_status = time.time()
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -131,10 +170,11 @@ async def main(argv: list[str] | None = None) -> int:
     ledger = TokenLedger(store_path=os.path.join(args.workdir, f"tokens_node-{args.id}.json"))
 
     enrichers = []
-    if not args.no_research:
-        enrichers.append(research_enricher)
-    if not args.no_external_info:
-        enrichers.append(external_info_enricher)
+    if not args.work_sharing:   # with work sharing these lookups are shared jobs instead
+        if not args.no_research:
+            enrichers.append(research_enricher)
+        if not args.no_external_info:
+            enrichers.append(external_info_enricher)
 
     try:
         node = NetworkNode(
@@ -167,6 +207,13 @@ async def main(argv: list[str] | None = None) -> int:
         print(f"Other nodes trust it with:  --trust {args.id}={node.signing_pub_hex}")
         return 0
 
+    if args.work_sharing:
+        WorkManager(node, WorkSchedule(
+            round_seconds=args.round_seconds,
+            research_every=0 if args.no_research else 3,
+            external_every=0 if args.no_external_info else 2,
+        ), takeover_seconds=args.takeover_seconds).attach()
+
     print("=" * 78)
     print(f"REAL NETWORK NODE  id={args.id}  bind={args.bind}:{args.port}")
     print(f"This node's public signing key: {node.signing_pub_hex}")
@@ -186,6 +233,7 @@ async def main(argv: list[str] | None = None) -> int:
 
     stop_event = asyncio.Event()
     run_task = asyncio.create_task(node.run(stop_event))
+    watcher = asyncio.create_task(watch(node, stop_event, args.status_file, args.stop_file))
     try:
         if args.duration > 0:
             await asyncio.sleep(args.duration)
@@ -199,6 +247,9 @@ async def main(argv: list[str] | None = None) -> int:
         stop_event.set()
         if not run_task.done():
             await run_task
+        await watcher
+        if args.status_file:
+            write_status(node, args.status_file)
 
     ok, msg = node.chain.verify_chain()
     print("\n" + "=" * 78)

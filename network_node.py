@@ -33,6 +33,11 @@ Replaces the four overlapping live_*.py demo scripts with one class:
     receiver that has no session for a sender (e.g. it restarted) answers
     "n" and the sender re-handshakes. Connect/read timeouts and a frame
     size cap keep one bad connection from stalling or exhausting a node.
+  - hooks for work sharing (work_sharing.py): on_verified_block callbacks,
+    background loops started by run(), mine_and_gossip(extra=...) for
+    publishing work results, and an encrypted "C" chain request so a peer
+    can audit this node's recent chain. self.stats counts what happened,
+    for status files and the daily report.
 
 Honest scope note: consensus/fork-resolution across nodes is NOT
 implemented here (see chain_store.py's docstring) — each node keeps its
@@ -54,6 +59,7 @@ import hashlib
 import json
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -84,6 +90,9 @@ MAX_BLOCK_FRAME_BYTES = 1 << 20   # 1 MiB; real blocks are a few KB
 # 1-byte status a receiver writes back after a block frame
 STATUS_OK = b"k"
 STATUS_NO_SESSION = b"n"   # unknown sender session or undecryptable: re-handshake
+
+# how many of its most recent blocks a node hands to an auditing peer
+CHAIN_AUDIT_MAX_BLOCKS = 200
 
 
 def _handshake_signed_bytes(node_id: int, port: int, exchange_pub: bytes) -> bytes:
@@ -171,6 +180,14 @@ class NetworkNode:
         # two nodes can't leave them holding different keys.
         self.outbound: dict[tuple[str, int], PeerSession] = {}
         self.inbound: dict[int, PeerSession] = {}
+        self._handshake_locks: dict[tuple[str, int], asyncio.Lock] = {}
+
+        # work sharing hooks (see work_sharing.WorkManager.attach)
+        self.on_verified_block: list[Callable[[dict], None]] = []
+        self.background: list[Callable[[asyncio.Event], "asyncio.Future"]] = []
+        self.work = None
+        self.stats: Counter = Counter()
+        self.started_at = time.time()
 
         self.block_counter = 0
         self.blocks_received = 0
@@ -284,6 +301,7 @@ class NetworkNode:
                 body = await self._read(reader, HANDSHAKE_BODY_LEN)
                 checked = self._check_handshake_body(body)
                 if checked is None:
+                    self.stats["handshakes_rejected"] += 1
                     self.log("<- handshake with bad signature or unpinned/changed signing key, dropping")
                     return
                 _, their_node_id, their_pub = checked
@@ -312,6 +330,7 @@ class NetworkNode:
                         raise LookupError
                     plaintext = aead_decrypt(session.session_key, frame, aad=_block_aad(sender_id, self.node_id))
                 except (LookupError, InvalidTag):
+                    self.stats["no_session_replies"] += 1
                     self.log(f"<- block from node-{sender_id} with no usable session, asking it to re-handshake")
                     writer.write(STATUS_NO_SESSION)
                     await writer.drain()
@@ -321,13 +340,18 @@ class NetworkNode:
 
                 block = json.loads(plaintext.decode())
                 self.blocks_received += 1
+                self.stats["blocks_received"] += 1
                 if block.get("origin") != session.peer_node_id:
+                    self.stats["relayed_blocks_dropped"] += 1
                     self.log(
                         f"<- block claiming origin node-{block.get('origin')} arrived over "
                         f"node-{session.peer_node_id}'s session, dropping (relay/replay)"
                     )
                     return
                 self._verify_and_process(block)
+
+            elif msg_type == b"C":  # encrypted chain request (for audits)
+                await self._serve_chain_request(reader, writer)
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionResetError):
             pass
         except Exception as e:
@@ -352,6 +376,7 @@ class NetworkNode:
         if fully_verified:
             seen = self.accepted_indices.setdefault((block["origin"], block.get("boot_id")), set())
             if block["index"] in seen:
+                self.stats["replays_rejected"] += 1
                 self.log(f"<- block #{block['index']} from {origin_key} REPLAYED, already accepted, no token")
                 return
             seen.add(block["index"])
@@ -360,11 +385,20 @@ class NetworkNode:
         for key in ("research", "external_info"):
             if block.get(key):
                 tag += f"  [{key}]"
+        if isinstance(block.get("work"), dict):
+            tag += f"  [work {block['work'].get('task')}]"
 
         if fully_verified:
+            self.stats["blocks_verified"] += 1
             bal = self.ledger.award(origin_key, 1, f"block #{block['index']} verified by {self.node_key}")
             self.log(f"<- block #{block['index']} from {origin_key} VERIFIED, +1 token (balance {bal}){tag}")
+            for hook in self.on_verified_block:
+                try:
+                    hook(block)
+                except Exception as e:
+                    self.log(f"on_verified_block hook error: {e}")
         else:
+            self.stats["blocks_failed_verification"] += 1
             self.log(
                 f"<- block #{block['index']} from {origin_key} FAILED verification "
                 f"(strand={strand_ok} complement={complement_ok} identity={identity_ok} "
@@ -385,6 +419,14 @@ class NetworkNode:
         session = self.outbound.get(addr)
         if session and session.handshake_done:
             return session
+        lock = self._handshake_locks.setdefault(addr, asyncio.Lock())
+        async with lock:
+            session = self.outbound.get(addr)
+            if session and session.handshake_done:   # another task just finished it
+                return session
+            return await self._do_handshake(addr)
+
+    async def _do_handshake(self, addr: tuple[str, int]) -> Optional[PeerSession]:
         host, port = addr
         writer = None
         try:
@@ -394,6 +436,7 @@ class NetworkNode:
             reply = await self._read(reader, 1 + HANDSHAKE_BODY_LEN)
             checked = self._check_handshake_body(reply[1:]) if reply[:1] == b"h" else None
             if checked is None or checked[0] != port:
+                self.stats["handshakes_rejected"] += 1
                 self.log(f"handshake reply from {host}:{port} failed signature/key check, not sending")
                 return None
             session = PeerSession(
@@ -428,14 +471,17 @@ class NetworkNode:
             if writer is not None:
                 writer.close()
 
-    async def mine_and_gossip(self):
+    async def mine_and_gossip(self, extra: Optional[dict] = None, run_enrichers: bool = True):
         self.block_counter += 1
 
         enrichment = {}
-        for enricher in self.enrichers:
-            result = await enricher(self.block_counter)
-            if result:
-                enrichment.update(result)
+        if run_enrichers:
+            for enricher in self.enrichers:
+                result = await enricher(self.block_counter)
+                if result:
+                    enrichment.update(result)
+        if extra:
+            enrichment.update(extra)
 
         raw = (
             self.identity_strand.encode()
@@ -479,6 +525,7 @@ class NetworkNode:
 
         # Store in OUR OWN real local chain (previous_hash linked).
         self.chain.append(block)
+        self.stats["blocks_mined"] += 1
 
         tag = " ".join(f"[{k}]" for k in enrichment)
         self.log(f"-> mined block #{self.block_counter} hash={digest.hex()[:12]}... {tag}")
@@ -498,13 +545,108 @@ class NetworkNode:
                 # unreachable: handshake afresh next time it's back
                 self.outbound.pop(addr, None)
 
+    # -- chain audits: serve / fetch a node's recent chain over its session --
+
+    async def _serve_chain_request(self, reader, writer) -> None:
+        requester = int.from_bytes(await self._read(reader, 4), "big")
+        length = int.from_bytes(await self._read(reader, 4), "big")
+        if not 0 < length <= 4096:
+            return
+        frame = await self._read(reader, length)
+        session = self.inbound.get(requester)
+        try:
+            if not session or not session.handshake_done:
+                raise LookupError
+            request = json.loads(aead_decrypt(
+                session.session_key, frame, aad=f"chain-req|node-{requester}->node-{self.node_id}".encode()))
+        except (LookupError, InvalidTag, ValueError):
+            self.stats["no_session_replies"] += 1
+            writer.write(STATUS_NO_SESSION)
+            await writer.drain()
+            return
+        limit = max(1, min(int(request.get("max", CHAIN_AUDIT_MAX_BLOCKS)), CHAIN_AUDIT_MAX_BLOCKS))
+        blocks = [b.to_dict() for b in self.chain.blocks[-limit:]]
+        body = json.dumps({"nonce": request.get("nonce"), "blocks": blocks}).encode()
+        while len(body) > MAX_BLOCK_FRAME_BYTES - 1024 and len(blocks) > 1:
+            blocks = blocks[len(blocks) // 2:]   # keep the most recent half until it fits
+            body = json.dumps({"nonce": request.get("nonce"), "blocks": blocks}).encode()
+        sealed = aead_encrypt(session.session_key, body,
+                              aad=f"chain-resp|node-{self.node_id}->node-{requester}".encode())
+        writer.write(STATUS_OK + len(sealed).to_bytes(4, "big") + sealed)
+        await writer.drain()
+        self.stats["chain_requests_served"] += 1
+
+    async def fetch_peer_chain(self, addr: tuple[str, int], max_blocks: int = CHAIN_AUDIT_MAX_BLOCKS,
+                               _retry: bool = True) -> Optional[list[dict]]:
+        """The peer at addr's most recent chain blocks (oldest first), fetched
+        over our outbound session, or None if it can't be reached/verified."""
+        session = await self._ensure_handshake(addr)
+        if session is None:
+            return None
+        nonce = os.urandom(8).hex()
+        request = aead_encrypt(
+            session.session_key, json.dumps({"nonce": nonce, "max": max_blocks}).encode(),
+            aad=f"chain-req|node-{self.node_id}->node-{session.peer_node_id}".encode())
+        writer = None
+        try:
+            reader, writer = await self._connect(addr)
+            writer.write(b"C" + self.node_id.to_bytes(4, "big") + len(request).to_bytes(4, "big") + request)
+            await writer.drain()
+            status = await self._read(reader, 1)
+            if status == STATUS_NO_SESSION:
+                self.outbound.pop(addr, None)
+                return await self.fetch_peer_chain(addr, max_blocks, _retry=False) if _retry else None
+            length = int.from_bytes(await self._read(reader, 4), "big")
+            if not 0 < length <= MAX_BLOCK_FRAME_BYTES:
+                return None
+            body = aead_decrypt(session.session_key, await self._read(reader, length),
+                                aad=f"chain-resp|node-{session.peer_node_id}->node-{self.node_id}".encode())
+            reply = json.loads(body)
+            if reply.get("nonce") != nonce or not isinstance(reply.get("blocks"), list):
+                return None
+            return reply["blocks"]
+        except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError, InvalidTag, ValueError):
+            return None
+        finally:
+            if writer is not None:
+                writer.close()
+
+    def address_of(self, node_id: int) -> Optional[tuple[str, int]]:
+        """The configured peer address whose handshake authenticated as node_id."""
+        for addr, session in self.outbound.items():
+            if session.handshake_done and session.peer_node_id == node_id:
+                return addr
+        return None
+
+    def status(self) -> dict:
+        ok, msg = self.chain.verify_chain()
+        return {
+            "node_id": self.node_id,
+            "boot_id": self.boot_id,
+            "started_at": self.started_at,
+            "updated_at": time.time(),
+            "stats": dict(self.stats),
+            "chain_blocks": len(self.chain.blocks),
+            "chain_ok": ok,
+            "chain_msg": msg,
+            "pinned_peers": sorted(self.peer_signing_keys),
+            "connected_peers": sorted(s.peer_node_id for s in self.outbound.values() if s.handshake_done),
+            "work": self.work.status() if self.work else None,
+        }
+
     async def run(self, stop_event: asyncio.Event):
         await self.start_server()
+        background = [asyncio.create_task(loop(stop_event)) for loop in self.background]
         while not stop_event.is_set():
             await self.mine_and_gossip()
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self.mine_interval)
             except asyncio.TimeoutError:
+                pass
+        for task in background:
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
         self.server.close()
         await self.server.wait_closed()
