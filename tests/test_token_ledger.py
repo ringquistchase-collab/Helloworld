@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 from token_ledger import TokenLedger
 
 
@@ -39,3 +41,32 @@ def test_persistence_across_reload(tmp_path):
     TokenLedger(store_path=path).credit("node-a", 1.5, reason="mine_block")
     reloaded = TokenLedger(store_path=path)
     assert reloaded.balance("node-a") == 1.5
+
+
+# -- award() / leaderboard() (positive-only contribution points) --
+
+def test_award_adds_points_via_the_transaction_log():
+    ledger = TokenLedger()
+    ledger.award("node-a", 1, reason="peer verified block")
+    ledger.award("node-a", 3, reason="research-linked block verified")
+    assert ledger.balance("node-a") == 4
+    # award records through the same log history()/all_balances() read
+    assert len(ledger.history("node-a")) == 2
+
+
+def test_award_rejects_non_positive():
+    ledger = TokenLedger()
+    with pytest.raises(ValueError):
+        ledger.award("node-a", 0, reason="zero")
+    with pytest.raises(ValueError):
+        ledger.award("node-a", -2, reason="negative")
+
+
+def test_leaderboard_sorted_descending():
+    ledger = TokenLedger()
+    ledger.award("node-a", 2, reason="x")
+    ledger.award("node-b", 5, reason="y")
+    ledger.award("node-c", 1, reason="z")
+    board = ledger.leaderboard()
+    assert [n for n, _ in board] == ["node-b", "node-a", "node-c"]
+    assert board[0] == ("node-b", 5)
