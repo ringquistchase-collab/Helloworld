@@ -101,9 +101,17 @@ async def main():
             ledger=ledger,
             chain_dir=WORKDIR,
             enrichers=[research_enricher, external_info_enricher],
+            require_known_peers=True,
         )
         for i, p in enumerate(ports)
     ]
+    # All three nodes are yours and start in this process, so pin every
+    # node's Ed25519 signing key with every other node up front; an
+    # unknown or changed signing key is then rejected rather than trusted.
+    for n in nodes:
+        for peer in nodes:
+            if peer is not n:
+                n.trust_peer(peer.node_id, peer.signing_pub_hex)
 
     stop_event = asyncio.Event()
     tasks = [asyncio.create_task(n.run(stop_event)) for n in nodes]
