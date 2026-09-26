@@ -44,6 +44,23 @@ NODE_COUNT = 3
 RUN_SECONDS = 9.0
 
 
+def shared_per_round(fetch):
+    """All nodes call their enrichers with the same block counter at about
+    the same moment. Without sharing, each of the NODE_COUNT nodes made its
+    own identical outside request per round (which is what tripped
+    blockstream.info's 429 rate limit). This runs `fetch(counter)` once per
+    counter and hands every node the same result."""
+    tasks: dict[int, asyncio.Task] = {}
+
+    async def enricher(counter: int) -> dict | None:
+        if counter not in tasks:
+            tasks[counter] = asyncio.ensure_future(fetch(counter))
+        return await asyncio.shield(tasks[counter])
+
+    return enricher
+
+
+@shared_per_round
 async def research_enricher(counter: int) -> dict | None:
     if counter % 3 != 0:
         return None
@@ -62,6 +79,7 @@ async def research_enricher(counter: int) -> dict | None:
         return {"research": {"source": "none", "error": str(e)}}
 
 
+@shared_per_round
 async def external_info_enricher(counter: int) -> dict | None:
     if counter % 4 != 0:
         return None

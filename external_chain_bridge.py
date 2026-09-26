@@ -29,27 +29,85 @@ and nothing ever crosses into your own ledger's arithmetic.
 from __future__ import annotations
 
 import time
+import concurrent.futures
 
 import requests
 
+# Bug found during a real multi-node run: 3 nodes reading blockstream.info
+# within the same second tripped its rate limit (429) on one node. Fixed
+# with a real fallback to a second independent public source (mempool.space
+# mirrors the same public chain-tip data) plus a short retry, rather than
+# hammering one endpoint or silently returning a stale/fabricated value.
+# (run_consolidated_network.py also now shares one snapshot per round
+# across its nodes instead of each node fetching its own.)
+_BITCOIN_TIP_SOURCES = [
+    ("https://blockstream.info/api/blocks/tip/height", "blockstream.info"),
+    ("https://mempool.space/api/blocks/tip/height", "mempool.space"),
+]
 
-def fetch_bitcoin_tip_height() -> dict:
+# Callers (NetworkNode enrichers) wait on this before mining, so the whole
+# snapshot is bounded: each request times out after REQUEST_TIMEOUT_SECONDS,
+# and build_external_info_snapshot() gives up on anything still pending
+# after SNAPSHOT_BUDGET_SECONDS, recording it as an error.
+REQUEST_TIMEOUT_SECONDS = 3.0
+SNAPSHOT_BUDGET_SECONDS = 5.0
+RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Only transient failures are worth retrying against the same source:
+    timeouts, dropped connections, rate limiting (429) and server errors
+    (5xx). A malformed body or any other 4xx will fail the same way again."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    return False
+
+
+def _time_left(deadline: float | None) -> float:
+    if deadline is None:
+        return REQUEST_TIMEOUT_SECONDS
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("external snapshot time budget exhausted")
+    return min(REQUEST_TIMEOUT_SECONDS, remaining)
+
+
+def fetch_bitcoin_tip_height(deadline: float | None = None) -> dict:
     """Real, public, anonymous read: the current tip height of the real
-    Bitcoin blockchain. No address, no wallet, no identity involved."""
-    resp = requests.get("https://blockstream.info/api/blocks/tip/height", timeout=10)
-    resp.raise_for_status()
-    height = int(resp.text.strip())
-    return {"chain": "bitcoin", "metric": "tip_height", "value": height, "source": "blockstream.info"}
+    Bitcoin blockchain. No address, no wallet, no identity involved.
+    Tries a second independent public source if the first is rate-limited
+    or unreachable, rather than failing on a single provider's hiccup.
+    `deadline` is a time.monotonic() value to stop trying by."""
+    last_error = None
+    for url, source_name in _BITCOIN_TIP_SOURCES:
+        for attempt in range(2):
+            try:
+                resp = requests.get(url, timeout=_time_left(deadline))
+                resp.raise_for_status()
+                height = int(resp.text.strip())
+                return {"chain": "bitcoin", "metric": "tip_height", "value": height, "source": source_name}
+            except TimeoutError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt == 0 and _is_retryable(e):
+                    time.sleep(min(RETRY_BACKOFF_SECONDS, _time_left(deadline)))
+                    continue
+                break  # not retryable, or already retried: next source
+    raise RuntimeError(f"all Bitcoin tip-height sources failed: {last_error}")
 
 
-def fetch_ethereum_block_number() -> dict:
+def fetch_ethereum_block_number(deadline: float | None = None) -> dict:
     """Real, public, anonymous read: the current block number of the real
     Ethereum network, via a public JSON-RPC endpoint. No address, no
-    wallet, no identity involved."""
+    wallet, no identity involved. `deadline` as for the Bitcoin read."""
     resp = requests.post(
         "https://ethereum.publicnode.com",
         json={"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1},
-        timeout=10,
+        timeout=_time_left(deadline),
     )
     resp.raise_for_status()
     body = resp.json()
@@ -63,13 +121,29 @@ def build_external_info_snapshot() -> dict:
     """Read-only snapshot of other real networks' public chain-tip info.
     This function has NO parameter and NO code path for a wallet address,
     a private key, a token balance, or a transaction — informational only,
-    structurally, not just by convention."""
+    structurally, not just by convention.
+
+    Both reads run in parallel and the whole call returns within about
+    SNAPSHOT_BUDGET_SECONDS; a read still pending then is recorded as an
+    error (its thread is left to finish on its own, bounded by its own
+    request timeout)."""
     snapshot = {"timestamp": time.time(), "reads": []}
-    for fetch_fn in (fetch_bitcoin_tip_height, fetch_ethereum_block_number):
-        try:
-            snapshot["reads"].append(fetch_fn())
-        except Exception as e:
-            snapshot["reads"].append({"error": str(e), "source": fetch_fn.__name__})
+    fetchers = (fetch_bitcoin_tip_height, fetch_ethereum_block_number)
+    deadline = time.monotonic() + SNAPSHOT_BUDGET_SECONDS
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(fetchers))
+    try:
+        futures = [pool.submit(fn, deadline) for fn in fetchers]
+        concurrent.futures.wait(futures, timeout=SNAPSHOT_BUDGET_SECONDS + 0.5)
+        for fetch_fn, fut in zip(fetchers, futures):
+            if not fut.done():
+                snapshot["reads"].append({"error": "timed out", "source": fetch_fn.__name__})
+                continue
+            try:
+                snapshot["reads"].append(fut.result())
+            except Exception as e:
+                snapshot["reads"].append({"error": str(e), "source": fetch_fn.__name__})
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return snapshot
 
 
