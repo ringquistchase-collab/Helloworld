@@ -47,6 +47,7 @@ import os
 PROJECT_FILES = [
     "digital_dna.py", "network_os.py", "crypto_layer.py",
     "growing_research_agent.py", "run_agent.py", "run_all.py", "run_local_network.py",
+    "network_node.py",
     "live_helix_network.py", "self_and_research_helix_live.py", "live_identity_network.py",
     "live_identity_network_with_tokens.py", "live_network_with_external_info.py",
     "lora_style_training.py", "maxwell_style_images.py", "maxwell_research.py",
@@ -71,7 +72,7 @@ PROJECT_FILES = [
     "tests/test_peer_history_store.py", "tests/test_signal_stats_bridge.py",
     "tests/test_dna_binary_codec.py", "tests/test_self_and_research_helix.py",
     "tests/test_dna_codec_js.py", "tests/test_external_chain_bridge.py",
-    "tests/test_chain_store.py",
+    "tests/test_chain_store.py", "tests/test_network_node.py",
     ".github/workflows/verify.yml",
     "scripts/local_verify_node.py", "scripts/verify.ps1",
     "scripts/verify.sh", "scripts/verify.bat",

@@ -116,6 +116,7 @@ ALLOWED_SOURCES = {
     "research_match":    "system-generated — re-queries a condition/biomarker term YOU explicitly registered against public ClinicalTrials.gov data; no patient identity involved",
     "eeg_telemetry":     "medical-grade EEG device with informed consent — only aggregate statistics (variance, band power) ever leave this source, never raw waveforms or anything claimed to depict brain state",
     "hormone_telemetry": "lab hormone panel with informed consent — only aggregate statistics ever leave this source, never raw values or anything claimed to depict endocrine state",
+    "network_mining": "system-generated — this node's own block-mining events on its local network (hash of a block it just mined), not new personal capture; lets the identity's signal history grow with real network activity",
 }
 
 
