@@ -111,6 +111,16 @@ def generate_exchange_keypair() -> tuple[X25519PrivateKey, X25519PublicKey]:
     return priv, priv.public_key()
 
 
+def generate_exchange_keypair_raw() -> tuple[X25519PrivateKey, bytes]:
+    """Same X25519 keypair, but returns the public key as raw 32-byte bytes
+    instead of a key object -- convenience for byte-oriented callers (a
+    per-peer session layer that ships raw pubkeys around). The object-based
+    generate_exchange_keypair() above is unchanged for existing callers."""
+    priv = X25519PrivateKey.generate()
+    pub_bytes = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return priv, pub_bytes
+
+
 def exchange_pub_to_hex(pub: X25519PublicKey) -> str:
     return pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
 
@@ -119,7 +129,11 @@ def exchange_pub_from_hex(hex_str: str) -> X25519PublicKey:
     return X25519PublicKey.from_public_bytes(bytes.fromhex(hex_str))
 
 
-def derive_shared_key(my_priv: X25519PrivateKey, their_pub: X25519PublicKey) -> bytes:
+def derive_shared_key(
+    my_priv: X25519PrivateKey,
+    their_pub: X25519PublicKey | bytes,
+    context: bytes = _HKDF_INFO,
+) -> bytes:
     """
     Real Diffie-Hellman: my_priv.exchange(their_pub) and
     their_priv.exchange(my_pub) mathematically produce the SAME raw
@@ -127,11 +141,20 @@ def derive_shared_key(my_priv: X25519PrivateKey, their_pub: X25519PublicKey) -> 
     ever leaving its own process. HKDF-SHA256 turns that raw ECDH
     output into a proper 256-bit symmetric key (raw DH output isn't
     uniformly random enough to use directly as a cipher key).
+
+    `their_pub` may be an X25519PublicKey OR raw 32-byte public-key bytes
+    (both accepted for caller convenience). `context` is the HKDF `info`
+    binding; it DEFAULTS to the project's fixed session label so existing
+    callers and the cross-language interop clients derive exactly the same
+    key as before -- pass a distinct context to scope a key to a different
+    purpose/session.
     """
+    if isinstance(their_pub, (bytes, bytearray)):
+        their_pub = X25519PublicKey.from_public_bytes(bytes(their_pub))
     shared_secret = my_priv.exchange(their_pub)
     return HKDF(
         algorithm=hashes.SHA256(), length=_AES_KEY_BYTES,
-        salt=None, info=_HKDF_INFO,
+        salt=None, info=context,
     ).derive(shared_secret)
 
 
